@@ -1,0 +1,10 @@
+node_modules/
+*.log
+desktop/src-tauri/target/
+desktop/node_modules/
+.DS_Store
+
+# playwright / harness artifacts
+.playwright-mcp/
+*.png
+!desktop/src-tauri/icons/*.png

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>slotyard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="/main.js" defer></script>
+  </head>
+  <body>
+    <div id="app" class="glass-panel">
+      <header class="panel-header">
+        <span class="title">slotyard</span>
+        <span id="repo" class="repo">—</span>
+        <button id="btn-refresh" class="icon-btn" title="Full rescan">↻</button>
+        <button id="btn-repo" class="icon-btn" title="Change repo">⋯</button>
+      </header>
+
+      <div id="view-main" class="view">
+        <button id="alert" class="alert hidden"></button>
+        <div id="scroll" class="scroll">
+          <div id="list"></div>
+          <div id="findings"></div>
+        </div>
+      </div>
+
+      <div id="view-detail" class="view hidden">
+        <header class="panel-header detail-head">
+          <button id="btn-back" class="icon-btn" title="Back">‹</button>
+          <span id="d-slot" class="title">SLOT</span>
+          <span id="d-name" class="repo"></span>
+        </header>
+        <div class="detail-body">
+          <h1 id="d-title"></h1>
+          <div id="d-meta" class="meta"></div>
+          <div id="d-path" class="path"></div>
+          <div id="d-ports" class="ports"></div>
+          <table>
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>State</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="d-roles"></tbody>
+          </table>
+          <div class="detail-actions">
+            <button id="d-wake" class="btn primary">Wake sleeping</button>
+            <button id="d-sleep" class="btn">Sleep non-core</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="status" class="status-bar"></div>
+    </div>
+  </body>
+</html>

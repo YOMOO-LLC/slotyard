@@ -1,0 +1,23 @@
+{
+  "name": "slotyard",
+  "version": "0.3.0",
+  "description": "Tells the truth about local parallel dev environments: nothing silently shares a database, and stacks start/stop on demand",
+  "type": "module",
+  "bin": {
+    "slotyard": "src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "DECISIONS.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "desktop": "npm --prefix desktop run dev",
+    "desktop:build": "npm --prefix desktop run build"
+  },
+  "license": "MIT"
+}
