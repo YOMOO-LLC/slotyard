@@ -87,7 +87,15 @@ fn resolve_cli(cfg: &AppConfig) -> Result<PathBuf, String> {
     if monorepo_cli.exists() {
         return Ok(monorepo_cli.canonicalize().map_err(|e| e.to_string())?);
     }
-    if let Ok(out) = Command::new("which").arg("slotyard").output() {
+    // Same trap as spawning node: a GUI process has launchd's stripped PATH, so
+    // `which` would miss a CLI installed under homebrew or ~/.local/bin. This
+    // fallback is what keeps the app working when the repo it was built from
+    // moves or is removed.
+    if let Ok(out) = Command::new("/usr/bin/which")
+        .arg("slotyard")
+        .env("PATH", user_path())
+        .output()
+    {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !s.is_empty() {
