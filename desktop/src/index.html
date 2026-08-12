@@ -13,7 +13,7 @@
         <span class="title">slotyard</span>
         <span id="repo" class="repo">—</span>
         <button id="btn-refresh" class="icon-btn" title="Full rescan">↻</button>
-        <button id="btn-repo" class="icon-btn" title="Change repo">⋯</button>
+        <button id="btn-repo" class="icon-btn" title="Settings">⋯</button>
       </header>
 
       <div id="view-main" class="view">
@@ -49,6 +49,102 @@
             <button id="d-wake" class="btn primary">Wake sleeping</button>
             <button id="d-sleep" class="btn">Sleep non-core</button>
           </div>
+        </div>
+      </div>
+
+      <div id="view-settings" class="view hidden">
+        <header class="panel-header detail-head">
+          <button id="btn-settings-back" class="icon-btn" title="Back">‹</button>
+          <span class="title">Settings</span>
+        </header>
+        <div id="settings-body" class="settings-body">
+          <section class="settings-section">
+            <h2>Repo</h2>
+            <div class="setting-row">
+              <div class="setting-main">
+                <div class="setting-label">Repo path</div>
+                <div id="settings-repo" class="setting-value mono"></div>
+              </div>
+              <button id="btn-change-repo" class="btn">Change…</button>
+            </div>
+            <div id="recent-repos" class="recent-repos"></div>
+            <div class="setting-row">
+              <div class="setting-main">
+                <div class="setting-label">Resolved layout</div>
+                <div id="settings-layout" class="setting-value"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h2>Startup</h2>
+            <div class="setting-row">
+              <label class="switch-row" for="launch-login">
+                <span>Launch at login</span>
+                <input id="launch-login" type="checkbox" class="switch-input" />
+                <span class="switch" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div id="launch-note" class="setting-note"></div>
+          </section>
+
+          <section class="settings-section">
+            <h2>Scanning</h2>
+            <div class="setting-row">
+              <div class="setting-main">
+                <label class="setting-label" for="poll-seconds">Poll interval (seconds)</label>
+                <div id="poll-note" class="setting-note"></div>
+              </div>
+              <input id="poll-seconds" type="number" min="1" step="1" class="number-input" />
+            </div>
+            <div class="setting-row">
+              <label class="switch-row" for="pause-scanning">
+                <span>Pause scanning</span>
+                <input id="pause-scanning" type="checkbox" class="switch-input" />
+                <span class="switch" aria-hidden="true"></span>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h2>Tray badge</h2>
+            <div id="badge-mode" class="segmented">
+              <button class="badge-option" data-mode="critical_and_warning">Critical and warning</button>
+              <button class="badge-option" data-mode="critical">Critical only</button>
+              <button class="badge-option" data-mode="never">Never</button>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h2>Findings</h2>
+            <div id="mute-list" class="mute-list"></div>
+            <div class="setting-note">Critical findings cannot be muted.</div>
+          </section>
+
+          <section class="settings-section">
+            <h2>Advanced</h2>
+            <div class="setting-row">
+              <div class="setting-main">
+                <div class="setting-label">CLI path override</div>
+                <div id="settings-cli" class="setting-value mono"></div>
+              </div>
+              <div class="setting-actions">
+                <button id="btn-change-cli" class="btn">Change…</button>
+                <button id="btn-clear-cli" class="btn">Clear</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-main">
+                <div class="setting-label">Path actually used</div>
+                <div id="settings-cli-resolved" class="setting-value mono"></div>
+                <div id="settings-cli-source" class="setting-note"></div>
+              </div>
+            </div>
+            <div class="setting-row">
+              <button id="btn-open-config" class="btn">Open config file</button>
+              <div id="settings-version" class="setting-note"></div>
+            </div>
+          </section>
         </div>
       </div>
 

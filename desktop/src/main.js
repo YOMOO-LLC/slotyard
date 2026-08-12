@@ -10,6 +10,10 @@ let selectedSlot = null;
 let pollTimer = null;
 let busy = false;
 let coldOpen = false;
+let settingsOpen = false;
+let version = null;
+let launchStatus = null;
+let cliResolution = null;
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -18,6 +22,7 @@ const el = (tag, cls, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
+const POLL_FLOOR = 8;
 
 function basename(p) {
   if (!p) return "—";
@@ -39,10 +44,13 @@ function fmtUptime(s) {
 }
 
 const findings = () => doctor?.findings || [];
+const mutedKinds = () => new Set((config?.mutedKinds || []).filter((k) => k !== "critical"));
+const visibleFindings = () =>
+  findings().filter((f) => f.severity === "critical" || !mutedKinds().has(f.kind));
 /** Findings that belong to a slot. unassigned-default is attached to slot 0 but
  *  is not "a problem with slot 0", so it is rendered separately. */
 const findingsFor = (slot) =>
-  findings().filter((f) => f.slot === slot.slot && f.kind !== "unassigned-default");
+  visibleFindings().filter((f) => f.slot === slot.slot && f.kind !== "unassigned-default");
 
 function slotDot(slot) {
   const fs = findingsFor(slot);
@@ -58,16 +66,29 @@ function setStatus(msg, isError = false) {
 }
 
 function showMain() {
+  settingsOpen = false;
   $("view-main").classList.remove("hidden");
   $("view-detail").classList.add("hidden");
+  $("view-settings").classList.add("hidden");
   selectedSlot = null;
 }
 
 function showDetail(slot) {
+  settingsOpen = false;
   selectedSlot = slot;
   $("view-main").classList.add("hidden");
   $("view-detail").classList.remove("hidden");
+  $("view-settings").classList.add("hidden");
   renderDetail(slot);
+}
+
+function showSettings() {
+  settingsOpen = true;
+  selectedSlot = null;
+  $("view-main").classList.add("hidden");
+  $("view-detail").classList.add("hidden");
+  $("view-settings").classList.remove("hidden");
+  renderSettings();
 }
 
 async function copy(text, btn) {
@@ -97,8 +118,9 @@ async function copy(text, btn) {
 /** The alert bar. You should know whether anything is wrong without opening the
  *  panel — and the moment you do open it, before reading anything else. */
 function renderAlert() {
-  const crit = findings().filter((f) => f.severity === "critical").length;
-  const warn = findings().filter((f) => f.severity === "warning").length;
+  const visible = visibleFindings();
+  const crit = visible.filter((f) => f.severity === "critical").length;
+  const warn = visible.filter((f) => f.severity === "warning").length;
   const bar = $("alert");
   if (!crit && !warn) {
     bar.classList.add("hidden");
@@ -185,7 +207,7 @@ function renderList() {
   const list = $("list");
   list.innerHTML = "";
   if (!doctor) {
-    list.appendChild(el("div", "empty", "Scanning…"));
+    list.appendChild(el("div", "empty", config?.pauseScanning ? "Scanning paused" : "Scanning…"));
     return;
   }
 
@@ -198,7 +220,7 @@ function renderList() {
   if (!running.length) list.appendChild(el("div", "empty", "No environments running"));
   for (const s of running) list.appendChild(slotRow(s));
 
-  const unassigned = findings().find((f) => f.kind === "unassigned-default");
+  const unassigned = visibleFindings().find((f) => f.kind === "unassigned-default");
   if (unassigned) list.appendChild(unassignedRow(unassigned));
 
   if (cold.length) {
@@ -216,14 +238,26 @@ function renderList() {
 function renderFindings() {
   const box = $("findings");
   box.innerHTML = "";
-  // unassigned already appears in the list in its own shape; do not repeat it
-  const fs = findings().filter((f) => f.kind !== "unassigned-default");
-  if (!fs.length) {
+  if (!doctor) {
     box.appendChild(sectionHeader("FINDINGS", ""));
-    box.appendChild(el("div", "empty", "✓ No problems found"));
+    box.appendChild(el("div", "empty", config?.pauseScanning ? "No current scan" : "Scanning…"));
     return;
   }
-  box.appendChild(sectionHeader(`FINDINGS ${fs.length}`, ""));
+  // unassigned already appears in the list in its own shape; do not repeat it
+  const fs = visibleFindings().filter((f) => f.kind !== "unassigned-default");
+
+  // A mute hides a row; it must never quietly change what is true. Without this
+  // the panel reads "FINDINGS 3" when the scan actually returned 4, and a tool
+  // whose whole proposition is telling the truth has started lying by omission.
+  const hidden = findings().length - visibleFindings().length;
+  const mutedNote = hidden ? `${hidden} muted` : "";
+
+  if (!fs.length) {
+    box.appendChild(sectionHeader("FINDINGS", mutedNote));
+    box.appendChild(el("div", "empty", hidden ? "✓ Nothing unmuted to report" : "✓ No problems found"));
+    return;
+  }
+  box.appendChild(sectionHeader(`FINDINGS ${fs.length}`, mutedNote));
   for (const f of fs) {
     const sev = f.severity === "critical" ? "crit" : f.severity === "warning" ? "warn" : "info";
     const label = f.severity === "critical" ? "CRIT" : f.severity === "warning" ? "WARN" : "INFO";
@@ -357,6 +391,19 @@ async function refresh(opts = {}) {
   if (!quiet) setStatus("Scanning…");
   try {
     config = await invoke("get_config");
+    if (config.pauseScanning) {
+      stopPoll();
+      doctor = null;
+      const repo = config.repo || "";
+      $("repo").textContent = repo ? basename(repo) : "—";
+      $("repo").title = repo;
+      renderAlert();
+      renderList();
+      renderFindings();
+      setStatus("Scanning paused");
+      if (settingsOpen) renderSettings();
+      return;
+    }
     doctor = await invoke("run_doctor", { fast: !full });
     const repoName = doctor.repo ? basename(doctor.repo) : basename(config?.repo);
     $("repo").textContent = repoName || "—";
@@ -364,15 +411,12 @@ async function refresh(opts = {}) {
     renderAlert();
     renderList();
     renderFindings();
+    if (settingsOpen) renderSettings();
     if (selectedSlot) {
       const updated = (doctor?.slots || []).find((s) => s.slot === selectedSlot.slot);
       if (updated) selectedSlot = updated;
     }
-    invoke("set_tray_state", {
-      critical: findings().filter((f) => f.severity === "critical").length,
-      warning: findings().filter((f) => f.severity === "warning").length,
-      running: (doctor.slots || []).filter((s) => s.running).length,
-    }).catch(() => {});
+    updateTrayFromVisible();
     setStatus(
       `${full ? "Full scan" : "Updated"} ${new Date().toLocaleTimeString("en-GB", { hour12: false })}`,
     );
@@ -396,6 +440,7 @@ async function refreshThenFull() {
 
 function startPoll() {
   stopPoll();
+  if (config?.pauseScanning) return;
   // 10s quiet fast polls. A 5s full scan with docker stats used to freeze the UI.
   const sec = Math.max(config?.pollSeconds || 10, 8);
   pollTimer = setInterval(() => {
@@ -408,10 +453,180 @@ function stopPoll() {
   pollTimer = null;
 }
 
+function updateTrayFromVisible() {
+  const visible = visibleFindings();
+  invoke("set_tray_state", {
+    critical: visible.filter((f) => f.severity === "critical").length,
+    warning: visible.filter((f) => f.severity === "warning").length,
+    running: (doctor?.slots || []).filter((s) => s.running).length,
+  }).catch(() => {});
+}
+
+function renderRepoSettings() {
+  $("settings-repo").textContent = config?.repo || "—";
+  $("settings-layout").textContent = doctor?.layout || "—";
+
+  const recent = $("recent-repos");
+  recent.innerHTML = "";
+  const repos = (config?.recentRepos || []).filter((p) => p && p !== config?.repo);
+  if (!repos.length) {
+    recent.appendChild(el("div", "setting-note", "No recent repos yet."));
+    return;
+  }
+  for (const repo of repos) {
+    const b = el("button", "recent-repo", repo);
+    b.title = repo;
+    b.addEventListener("click", async () => {
+      try {
+        config = await invoke("set_repo", { repo });
+        await refresh({ full: true });
+      } catch (e) {
+        setStatus(String(e), true);
+      }
+    });
+    recent.appendChild(b);
+  }
+}
+
+function renderLaunchSettings() {
+  const input = $("launch-login");
+  const note = $("launch-note");
+  note.classList.remove("error");
+  if (!launchStatus) {
+    input.disabled = true;
+    input.checked = false;
+    note.textContent = "";
+    return;
+  }
+  input.checked = launchStatus.enabled;
+  input.disabled = !launchStatus.canEnable;
+  note.textContent = launchStatus.canEnable
+    ? launchStatus.enabled
+      ? "Runs at login."
+      : ""
+    : `Requires slotyard.app in /Applications (currently ${launchStatus.path}).`;
+}
+
+function renderPollSettings() {
+  const stored = Number.isFinite(config?.pollSeconds) ? config.pollSeconds : 10;
+  const effective = Math.max(stored, POLL_FLOOR);
+  $("poll-seconds").value = effective;
+  $("poll-note").textContent =
+    stored !== effective
+      ? `Stored ${stored}s is below the ${POLL_FLOOR}s floor; effective is ${effective}s.`
+      : "";
+}
+
+function renderBadgeSettings() {
+  const mode = config?.badgeMode || "critical_and_warning";
+  for (const b of document.querySelectorAll(".badge-option")) {
+    b.classList.toggle("active", b.dataset.mode === mode);
+  }
+}
+
+function renderMuteSettings() {
+  const box = $("mute-list");
+  box.innerHTML = "";
+  const byKind = new Map();
+  for (const f of findings()) {
+    if (f.severity === "critical") continue;
+    if (!byKind.has(f.kind)) byKind.set(f.kind, f.message || f.kind);
+  }
+  if (!byKind.size) {
+    box.appendChild(el("div", "setting-note", "No warning or info findings in the current scan."));
+  } else {
+    for (const [kind, message] of byKind) {
+      const muted = mutedKinds().has(kind);
+      const label = el("label", "mute-row");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = muted;
+      cb.addEventListener("change", async () => {
+        try {
+          config = await invoke("set_muted_kind", { kind, muted: cb.checked });
+          renderMuteSettings();
+          renderAlert();
+          renderList();
+          renderFindings();
+          updateTrayFromVisible();
+        } catch (e) {
+          cb.checked = !cb.checked;
+          setStatus(String(e), true);
+        }
+      });
+      const body = el("div", "setting-main");
+      body.appendChild(el("span", "mute-kind", kind));
+      if (message) body.appendChild(el("div", "mute-message", message));
+      label.appendChild(cb);
+      label.appendChild(body);
+      box.appendChild(label);
+    }
+  }
+  const hiddenCount = findings().filter(
+    (f) => f.severity !== "critical" && mutedKinds().has(f.kind),
+  ).length;
+  if (hiddenCount) {
+    box.appendChild(
+      el("div", "setting-note", `${hiddenCount} finding${hiddenCount === 1 ? "" : "s"} hidden by mutes.`),
+    );
+  }
+}
+
+function renderCliSettings() {
+  $("settings-cli").textContent = config?.cli || "—";
+  const resolved = $("settings-cli-resolved");
+  const source = $("settings-cli-source");
+  source.classList.remove("error");
+  if (!cliResolution) {
+    resolved.textContent = "Checking…";
+    source.textContent = "";
+    return;
+  }
+  if (cliResolution.error) {
+    resolved.textContent = "Not found";
+    source.classList.add("error");
+    source.textContent = cliResolution.error;
+    return;
+  }
+  resolved.textContent = cliResolution.path || "—";
+  const label = { config: "Configured path", build: "Repo build path", path: "PATH" }[
+    cliResolution.source
+  ] || cliResolution.source;
+  source.textContent = `${label}${cliResolution.note ? ` · ${cliResolution.note}` : ""}`;
+}
+
+async function loadSettingsInfo() {
+  try {
+    launchStatus = await invoke("get_launch_status");
+  } catch (e) {
+    launchStatus = { enabled: false, canEnable: false, path: "" };
+    $("launch-note").textContent = String(e);
+  }
+  renderLaunchSettings();
+  try {
+    cliResolution = await invoke("get_cli_resolution");
+  } catch (e) {
+    cliResolution = { path: null, source: "", note: null, error: String(e) };
+  }
+  renderCliSettings();
+}
+
+function renderSettings() {
+  renderRepoSettings();
+  renderLaunchSettings();
+  renderPollSettings();
+  $("pause-scanning").checked = !!config?.pauseScanning;
+  renderBadgeSettings();
+  renderMuteSettings();
+  renderCliSettings();
+  $("settings-version").textContent = version ? `v${version}` : "";
+  if (!launchStatus || !cliResolution) loadSettingsInfo();
+}
+
 async function chooseRepo() {
   try {
     config = await invoke("pick_repo");
-    await refresh();
+    await refresh({ full: true });
   } catch (e) {
     if (String(e) !== "cancelled") setStatus(String(e), true);
   }
@@ -419,11 +634,105 @@ async function chooseRepo() {
 
 function bind() {
   $("btn-refresh").addEventListener("click", () => refresh({ full: true }));
-  $("btn-repo").addEventListener("click", () => chooseRepo());
+  $("btn-repo").addEventListener("click", () => showSettings());
   $("btn-back").addEventListener("click", () => showMain());
+  $("btn-settings-back").addEventListener("click", () => showMain());
   $("alert").addEventListener("click", () => {
     showMain();
     $("findings").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("btn-change-repo").addEventListener("click", () => chooseRepo());
+
+  $("launch-login").addEventListener("change", async (e) => {
+    const enabled = e.target.checked;
+    try {
+      launchStatus = await invoke("set_launch_at_login", { enabled });
+      renderLaunchSettings();
+    } catch (err) {
+      e.target.checked = !enabled;
+      $("launch-note").classList.add("error");
+      $("launch-note").textContent = String(err);
+      setStatus(String(err), true);
+    }
+  });
+
+  $("poll-seconds").addEventListener("change", async () => {
+    const seconds = Number($("poll-seconds").value);
+    if (!Number.isInteger(seconds) || seconds < 1) {
+      setStatus("Poll interval must be at least 1 second.", true);
+      renderPollSettings();
+      return;
+    }
+    try {
+      config = await invoke("set_poll_seconds", { seconds });
+      renderPollSettings();
+      startPoll();
+    } catch (e) {
+      setStatus(String(e), true);
+      renderPollSettings();
+    }
+  });
+
+  $("pause-scanning").addEventListener("change", async (e) => {
+    const paused = e.target.checked;
+    try {
+      config = await invoke("set_pause_scanning", { paused });
+      if (paused) {
+        doctor = null;
+        stopPoll();
+        setStatus("Scanning paused");
+        renderAlert();
+        renderList();
+        renderFindings();
+      } else {
+        await refresh({ full: true });
+      }
+      renderSettings();
+    } catch (err) {
+      e.target.checked = !paused;
+      setStatus(String(err), true);
+    }
+  });
+
+  for (const b of document.querySelectorAll(".badge-option")) {
+    b.addEventListener("click", async () => {
+      const mode = b.dataset.mode;
+      if (mode === config?.badgeMode) return;
+      try {
+        config = await invoke("set_badge_mode", { mode });
+        renderBadgeSettings();
+        updateTrayFromVisible();
+      } catch (e) {
+        setStatus(String(e), true);
+      }
+    });
+  }
+
+  $("btn-change-cli").addEventListener("click", async () => {
+    try {
+      config = await invoke("pick_cli");
+      cliResolution = null;
+      renderSettings();
+    } catch (e) {
+      if (String(e) !== "cancelled") setStatus(String(e), true);
+    }
+  });
+  $("btn-clear-cli").addEventListener("click", async () => {
+    try {
+      config = await invoke("clear_cli");
+      cliResolution = null;
+      renderSettings();
+    } catch (e) {
+      setStatus(String(e), true);
+    }
+  });
+  $("btn-open-config").addEventListener("click", async () => {
+    try {
+      await invoke("open_config_file");
+      setStatus("Config revealed in Finder.");
+    } catch (e) {
+      setStatus(String(e), true);
+    }
   });
 }
 
@@ -431,6 +740,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   bind();
   try {
     config = await invoke("get_config");
+    version = await invoke("get_version");
   } catch {
     /* ignore */
   }

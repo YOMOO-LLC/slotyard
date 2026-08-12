@@ -540,3 +540,232 @@ button.copy.done {
 .detail-head {
   padding: 2px 14px 8px;
 }
+
+/* ── settings ─────────────────────────────────────────────── */
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 14px 16px;
+}
+
+.settings-section {
+  padding: 12px 0;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.settings-section:last-child {
+  border-bottom: 0;
+}
+
+.settings-section h2 {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+  margin-bottom: 4px;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.setting-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.setting-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.setting-value {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.setting-value.mono,
+.setting-note.mono {
+  font-family: var(--mono);
+}
+
+.setting-note {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  line-height: 1.35;
+  margin-top: 3px;
+}
+
+.setting-note.error {
+  color: var(--crit);
+}
+
+.setting-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.recent-repos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+
+.recent-repo {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.recent-repo:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.switch-input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  border: 0.5px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  transition: background 120ms ease;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  transition: transform 120ms ease;
+}
+
+.switch-input:checked + .switch {
+  background: rgba(10, 132, 255, 0.7);
+  border-color: rgba(100, 180, 255, 0.5);
+}
+
+.switch-input:checked + .switch::after {
+  transform: translateX(16px);
+}
+
+.switch-input:disabled + .switch {
+  opacity: 0.35;
+}
+
+.number-input {
+  width: 62px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  padding: 3px;
+  border-radius: 8px;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.badge-option {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 6px 4px;
+  border-radius: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.badge-option.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
+
+.mute-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.mute-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 0.5px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.mute-row input {
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+
+.mute-kind {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--accent);
+}
+
+.mute-message {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.3;
+  margin-top: 2px;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

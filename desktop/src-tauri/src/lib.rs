@@ -11,6 +11,20 @@ use tauri::{
 
 const PANEL: &str = "panel";
 const CONFIG_NAME: &str = "slotyard-desktop.json";
+const LAUNCH_AGENT_LABEL: &str = "dev.slotyard.desktop";
+const LAUNCH_AGENT_FILE: &str = "dev.slotyard.desktop.plist";
+const RECENT_REPO_LIMIT: usize = 5;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum BadgeMode {
+    #[default]
+    #[serde(rename = "critical_and_warning")]
+    CriticalAndWarning,
+    #[serde(rename = "critical")]
+    CriticalOnly,
+    #[serde(rename = "never")]
+    Never,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -21,10 +35,31 @@ struct AppConfig {
     cli: Option<String>,
     /// Poll interval while panel is open (seconds)
     poll_seconds: Option<u64>,
+    /// Last few repos picked from the panel, newest first
+    #[serde(default)]
+    recent_repos: Vec<String>,
+    /// No background badge scan and no panel poll while true
+    #[serde(default)]
+    pause_scanning: bool,
+    /// What colours the tray icon may use. Default matches current behaviour.
+    #[serde(default)]
+    badge_mode: BadgeMode,
+    /// Warning/info finding kinds the user muted. Critical is filtered below,
+    /// because the product invariant cannot be turned off by a config value.
+    #[serde(default)]
+    muted_kinds: Vec<String>,
 }
 
 struct State {
     config: Mutex<AppConfig>,
+    tray: Mutex<TrayCounts>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TrayCounts {
+    critical: u32,
+    warning: u32,
+    running: u32,
 }
 
 fn config_path() -> PathBuf {
@@ -38,7 +73,9 @@ fn load_config() -> AppConfig {
     let path = config_path();
     if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(c) = serde_json::from_str(&raw) {
-            return c;
+            let mut cfg: AppConfig = c;
+            clean_muted_kinds(&mut cfg);
+            return cfg;
         }
     }
     AppConfig {
@@ -57,10 +94,30 @@ fn save_config(cfg: &AppConfig) -> Result<(), String> {
     std::fs::write(path, raw).map_err(|e| e.to_string())
 }
 
+fn clean_muted_kinds(cfg: &mut AppConfig) {
+    // "critical" is not a finding kind, but a stale config might contain it.
+    // Drop it instead of trying to interpret it: critical findings never mute.
+    cfg.muted_kinds.retain(|k| k != "critical");
+}
+
+fn remember_repo(repo: &str, recent: &mut Vec<String>) {
+    recent.retain(|p| p != repo);
+    recent.insert(0, repo.to_string());
+    recent.truncate(RECENT_REPO_LIMIT);
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliResolution {
+    path: Option<String>,
+    source: String,
+    note: Option<String>,
+    error: Option<String>,
+}
+
 fn default_repo_guess() -> Option<String> {
     let home = dirs::home_dir()?;
     let candidates = [
-        
         home.join("Documents/GitHub/slotyard"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
     ];
@@ -74,36 +131,60 @@ fn default_repo_guess() -> Option<String> {
     None
 }
 
-fn resolve_cli(cfg: &AppConfig) -> Result<PathBuf, String> {
+/// The configured path is a user override, not a wall: if it stops existing,
+/// the app must keep working through the same build/PATH fallbacks and say so
+/// in Settings. Treating it as a hard error was how a moved repo became an
+/// invisible CLI mystery.
+fn resolve_cli_detailed(cfg: &AppConfig) -> Result<(PathBuf, String, Option<String>), String> {
+    let mut missing_override = None;
     if let Some(ref p) = cfg.cli {
         let pb = PathBuf::from(p);
         if pb.exists() {
-            return Ok(pb);
+            return Ok((pb, "config".into(), None));
         }
-        return Err(format!("CLI path does not exist: {p}"));
+        missing_override = Some(format!("Configured CLI path missing: {p}"));
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let monorepo_cli = manifest.join("../../src/cli.ts");
     if monorepo_cli.exists() {
-        return Ok(monorepo_cli.canonicalize().map_err(|e| e.to_string())?);
+        let p = monorepo_cli.canonicalize().map_err(|e| e.to_string())?;
+        return Ok((p, "build".into(), missing_override));
     }
     // Same trap as spawning node: a GUI process has launchd's stripped PATH, so
     // `which` would miss a CLI installed under homebrew or ~/.local/bin. This
     // fallback is what keeps the app working when the repo it was built from
     // moves or is removed.
-    if let Ok(out) = Command::new("/usr/bin/which")
+    if let Some(p) = find_on_user_path() {
+        return Ok((p, "path".into(), missing_override));
+    }
+    if let Some(note) = missing_override {
+        Err(format!(
+            "{note}. Cannot find slotyard CLI. Keep monorepo layout or set cli path."
+        ))
+    } else {
+        Err("Cannot find slotyard CLI. Keep monorepo layout or set cli path.".into())
+    }
+}
+
+fn resolve_cli(cfg: &AppConfig) -> Result<PathBuf, String> {
+    Ok(resolve_cli_detailed(cfg)?.0)
+}
+
+fn find_on_user_path() -> Option<PathBuf> {
+    let out = Command::new("/usr/bin/which")
         .arg("slotyard")
         .env("PATH", user_path())
         .output()
-    {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Ok(PathBuf::from(s));
-            }
-        }
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
-    Err("Cannot find slotyard CLI. Keep monorepo layout or set cli path.".into())
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
 }
 
 /// A GUI app launched from Finder or a login item does not inherit the shell's
@@ -141,7 +222,10 @@ fn resolve_node() -> PathBuf {
             return c;
         }
     }
-    if let Ok(out) = Command::new("/bin/zsh").args(["-lc", "command -v node"]).output() {
+    if let Ok(out) = Command::new("/bin/zsh")
+        .args(["-lc", "command -v node"])
+        .output()
+    {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !s.is_empty() {
             return PathBuf::from(s);
@@ -185,12 +269,16 @@ fn set_repo(state: tauri::State<'_, State>, repo: String) -> Result<AppConfig, S
         return Err(format!("Not a directory: {repo}"));
     }
     let mut cfg = state.config.lock().unwrap();
-    cfg.repo = Some(
+    let repo_str = Some(
         path.canonicalize()
             .map_err(|e| e.to_string())?
             .display()
             .to_string(),
     );
+    cfg.repo = repo_str.clone();
+    if let Some(ref p) = repo_str {
+        remember_repo(p, &mut cfg.recent_repos);
+    }
     save_config(&cfg)?;
     Ok(cfg.clone())
 }
@@ -202,6 +290,223 @@ fn pick_repo(state: tauri::State<'_, State>) -> Result<AppConfig, String> {
         .pick_folder()
         .ok_or_else(|| "cancelled".to_string())?;
     set_repo(state, folder.display().to_string())
+}
+
+#[tauri::command]
+fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
+fn set_poll_seconds(state: tauri::State<'_, State>, seconds: u64) -> Result<AppConfig, String> {
+    if seconds == 0 {
+        return Err("Poll interval must be at least 1 second.".into());
+    }
+    let mut cfg = state.config.lock().unwrap();
+    cfg.poll_seconds = Some(seconds);
+    save_config(&cfg)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn set_pause_scanning(
+    state: tauri::State<'_, State>,
+    app: AppHandle,
+    paused: bool,
+) -> Result<AppConfig, String> {
+    let mut cfg = state.config.lock().unwrap();
+    cfg.pause_scanning = paused;
+    save_config(&cfg)?;
+    let counts = state.tray.lock().unwrap().clone();
+    apply_tray_state(&app, counts, cfg.badge_mode, paused)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn set_badge_mode(
+    state: tauri::State<'_, State>,
+    app: AppHandle,
+    mode: String,
+) -> Result<AppConfig, String> {
+    let badge = match mode.as_str() {
+        "critical_and_warning" => BadgeMode::CriticalAndWarning,
+        "critical" => BadgeMode::CriticalOnly,
+        "never" => BadgeMode::Never,
+        _ => return Err(format!("Unknown badge mode: {mode}")),
+    };
+    let mut cfg = state.config.lock().unwrap();
+    cfg.badge_mode = badge;
+    save_config(&cfg)?;
+    let counts = state.tray.lock().unwrap().clone();
+    apply_tray_state(&app, counts, cfg.badge_mode, cfg.pause_scanning)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn set_muted_kind(
+    state: tauri::State<'_, State>,
+    kind: String,
+    muted: bool,
+) -> Result<AppConfig, String> {
+    if kind == "critical" {
+        return Err("Critical findings cannot be muted.".into());
+    }
+    let mut cfg = state.config.lock().unwrap();
+    if muted {
+        if !cfg.muted_kinds.contains(&kind) {
+            cfg.muted_kinds.push(kind);
+        }
+    } else {
+        cfg.muted_kinds.retain(|k| k != &kind);
+    }
+    save_config(&cfg)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn set_cli(state: tauri::State<'_, State>, cli: String) -> Result<AppConfig, String> {
+    if cli.trim().is_empty() {
+        return Err("CLI path cannot be empty.".into());
+    }
+    let mut cfg = state.config.lock().unwrap();
+    cfg.cli = Some(cli);
+    save_config(&cfg)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn clear_cli(state: tauri::State<'_, State>) -> Result<AppConfig, String> {
+    let mut cfg = state.config.lock().unwrap();
+    cfg.cli = None;
+    save_config(&cfg)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn pick_cli(state: tauri::State<'_, State>) -> Result<AppConfig, String> {
+    let file = rfd::FileDialog::new()
+        .set_title("Select slotyard CLI")
+        .pick_file()
+        .ok_or_else(|| "cancelled".to_string())?;
+    set_cli(state, file.display().to_string())
+}
+
+#[tauri::command]
+async fn get_cli_resolution(state: tauri::State<'_, State>) -> Result<CliResolution, String> {
+    let cfg = state.config.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || match resolve_cli_detailed(&cfg) {
+        Ok((path, source, note)) => CliResolution {
+            path: Some(path.display().to_string()),
+            source,
+            note,
+            error: None,
+        },
+        Err(error) => CliResolution {
+            path: None,
+            source: String::new(),
+            note: None,
+            error: Some(error),
+        },
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))
+}
+
+fn launch_agent_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library/LaunchAgents")
+        .join(LAUNCH_AGENT_FILE)
+}
+
+fn running_from_applications() -> bool {
+    std::env::current_exe()
+        .map(|p| p.display().to_string().starts_with("/Applications/"))
+        .unwrap_or(false)
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchStatus {
+    enabled: bool,
+    can_enable: bool,
+    path: String,
+}
+
+fn launch_status() -> LaunchStatus {
+    LaunchStatus {
+        enabled: launch_agent_path().exists(),
+        can_enable: running_from_applications(),
+        path: std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".into()),
+    }
+}
+
+#[tauri::command]
+fn get_launch_status() -> LaunchStatus {
+    launch_status()
+}
+
+#[tauri::command]
+fn set_launch_at_login(enabled: bool) -> Result<LaunchStatus, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let path = exe.display().to_string();
+    if enabled && !path.starts_with("/Applications/") {
+        return Err("Launch at login requires slotyard.app in /Applications.".into());
+    }
+
+    let agent = launch_agent_path();
+    if enabled {
+        if let Some(parent) = agent.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        // Writing the plist is enough for future logins. Avoid bootout while the
+        // user is inside this same launchd process; it would kill the toggle.
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{path}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+"#,
+            label = LAUNCH_AGENT_LABEL,
+            path = xml_escape(&path),
+        );
+        std::fs::write(&agent, plist).map_err(|e| e.to_string())?;
+    } else if agent.exists() {
+        std::fs::remove_file(&agent).map_err(|e| e.to_string())?;
+    }
+    Ok(launch_status())
+}
+
+#[tauri::command]
+fn open_config_file(state: tauri::State<'_, State>) -> Result<(), String> {
+    let path = config_path();
+    if !path.exists() {
+        save_config(&state.config.lock().unwrap())?;
+    }
+    Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -229,6 +534,9 @@ async fn run_doctor(
     fast: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let cfg = state.config.lock().unwrap().clone();
+    if cfg.pause_scanning {
+        return Err("Scanning paused.".into());
+    }
     let repo = cfg
         .repo
         .clone()
@@ -292,24 +600,54 @@ async fn run_lifecycle(
 ///
 /// Note: template mode forces the icon to the system's monochrome rendering,
 /// which erases the coloured dot. It must be off whenever a badge is shown.
-fn apply_tray_state(app: &AppHandle, critical: u32, warning: u32, running: u32) -> Result<(), String> {
+fn apply_tray_state(
+    app: &AppHandle,
+    counts: TrayCounts,
+    mode: BadgeMode,
+    paused: bool,
+) -> Result<(), String> {
+    {
+        let state: tauri::State<'_, State> = app.state();
+        *state.tray.lock().unwrap() = counts;
+    }
     let tray = app.tray_by_id("main").ok_or("tray missing")?;
-    let (bytes, template): (&[u8], bool) = if critical > 0 {
-        (include_bytes!("../icons/tray-critical.png"), false)
-    } else if warning > 0 {
-        (include_bytes!("../icons/tray-warning.png"), false)
-    } else {
+    let (bytes, template): (&[u8], bool) = if paused {
         (include_bytes!("../icons/tray.png"), true)
+    } else {
+        match mode {
+            BadgeMode::Never => (include_bytes!("../icons/tray.png"), true),
+            BadgeMode::CriticalOnly => {
+                if counts.critical > 0 {
+                    (include_bytes!("../icons/tray-critical.png"), false)
+                } else {
+                    (include_bytes!("../icons/tray.png"), true)
+                }
+            }
+            BadgeMode::CriticalAndWarning => {
+                if counts.critical > 0 {
+                    (include_bytes!("../icons/tray-critical.png"), false)
+                } else if counts.warning > 0 {
+                    (include_bytes!("../icons/tray-warning.png"), false)
+                } else {
+                    (include_bytes!("../icons/tray.png"), true)
+                }
+            }
+        }
     };
     let icon = Image::from_bytes(bytes).map_err(|e| e.to_string())?;
     tray.set_icon(Some(icon)).map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
-    tray.set_icon_as_template(template).map_err(|e| e.to_string())?;
-    let tip = match (critical, warning) {
-        (0, 0) => format!("slotyard — {running} running, all clear"),
-        (0, w) => format!("slotyard — {running} running, {w} warning"),
-        (c, 0) => format!("slotyard — {c} critical"),
-        (c, w) => format!("slotyard — {c} critical, {w} warning"),
+    tray.set_icon_as_template(template)
+        .map_err(|e| e.to_string())?;
+    let tip = if paused {
+        "slotyard — paused".to_string()
+    } else {
+        match (counts.critical, counts.warning) {
+            (0, 0) => format!("slotyard — {} running, all clear", counts.running),
+            (0, w) => format!("slotyard — {} running, {w} warning", counts.running),
+            (c, 0) => format!("slotyard — {c} critical"),
+            (c, w) => format!("slotyard — {c} critical, {w} warning"),
+        }
     };
     tray.set_tooltip(Some(&tip)).map_err(|e| e.to_string())?;
     Ok(())
@@ -318,7 +656,18 @@ fn apply_tray_state(app: &AppHandle, critical: u32, warning: u32, running: u32) 
 /// While the panel is open the frontend reports its own counts, saving a scan.
 #[tauri::command]
 fn set_tray_state(app: AppHandle, critical: u32, warning: u32, running: u32) -> Result<(), String> {
-    apply_tray_state(&app, critical, warning, running)
+    let state: tauri::State<'_, State> = app.state();
+    let cfg = state.config.lock().unwrap().clone();
+    apply_tray_state(
+        &app,
+        TrayCounts {
+            critical,
+            warning,
+            running,
+        },
+        cfg.badge_mode,
+        cfg.pause_scanning,
+    )
 }
 
 /// The badge cannot depend on the hidden webview. WebKit freezes its timers as
@@ -326,33 +675,57 @@ fn set_tray_state(app: AppHandle, critical: u32, warning: u32, running: u32) -> 
 /// this icon exists. So the scan runs here instead.
 fn spawn_badge_watcher(app: AppHandle, every: u64) {
     std::thread::spawn(move || loop {
-        let cfg = {
+        let (cfg, last_counts) = {
             let s: tauri::State<'_, State> = app.state();
-            let c = s.config.lock().unwrap().clone();
-            c
+            let cfg = s.config.lock().unwrap().clone();
+            let last_counts = s.tray.lock().unwrap().clone();
+            (cfg, last_counts)
         };
+        if cfg.pause_scanning {
+            let _ = apply_tray_state(&app, last_counts, cfg.badge_mode, true);
+            std::thread::sleep(std::time::Duration::from_secs(every));
+            continue;
+        }
         if let (Some(repo), Ok(cli)) = (cfg.repo.clone(), resolve_cli(&cfg)) {
             let cwd = PathBuf::from(&repo);
             if cwd.is_dir() {
                 if let Ok(out) = run_node_cli(&cli, &cwd, &["--json", "--fast"]) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                        let sev = |name: &str| {
-                            v["findings"]
-                                .as_array()
-                                .map(|a| a.iter().filter(|f| f["severity"] == name).count() as u32)
-                                .unwrap_or(0)
-                        };
-                        let running = v["slots"]
-                            .as_array()
-                            .map(|a| a.iter().filter(|s| s["running"] == true).count() as u32)
-                            .unwrap_or(0);
-                        let _ = apply_tray_state(&app, sev("critical"), sev("warning"), running);
+                        let counts = tray_counts_from_doctor(&v, &cfg.muted_kinds);
+                        let _ = apply_tray_state(&app, counts, cfg.badge_mode, false);
                     }
                 }
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(every));
     });
+}
+
+fn tray_counts_from_doctor(v: &serde_json::Value, muted_kinds: &[String]) -> TrayCounts {
+    let mut counts = TrayCounts::default();
+    if let Some(findings) = v["findings"].as_array() {
+        for f in findings {
+            let severity = f["severity"].as_str().unwrap_or("");
+            let kind = f["kind"].as_str().unwrap_or("");
+            if severity == "critical" {
+                counts.critical += 1;
+                continue;
+            }
+            // Muting is per-kind, but only for warning/info severity. A critical
+            // collision must still badge even if its kind is muted for warnings.
+            if severity == "warning" {
+                if muted_kinds.iter().any(|k| k == kind) {
+                    continue;
+                }
+                counts.warning += 1;
+            }
+        }
+    }
+    counts.running = v["slots"]
+        .as_array()
+        .map(|a| a.iter().filter(|s| s["running"] == true).count() as u32)
+        .unwrap_or(0);
+    counts
 }
 
 fn position_panel_near_tray(app: &AppHandle, x: f64, y: f64) {
@@ -395,11 +768,24 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(State {
             config: Mutex::new(config),
+            tray: Mutex::new(TrayCounts::default()),
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
             set_repo,
             pick_repo,
+            get_version,
+            set_poll_seconds,
+            set_pause_scanning,
+            set_badge_mode,
+            set_muted_kind,
+            set_cli,
+            clear_cli,
+            pick_cli,
+            get_cli_resolution,
+            get_launch_status,
+            set_launch_at_login,
+            open_config_file,
             open_url,
             run_doctor,
             run_lifecycle,
@@ -414,8 +800,7 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit slotyard", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &refresh_i, &quit_i])?;
 
-            let icon =
-                Image::from_bytes(include_bytes!("../icons/tray.png")).expect("tray icon");
+            let icon = Image::from_bytes(include_bytes!("../icons/tray.png")).expect("tray icon");
 
             let tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
@@ -460,6 +845,14 @@ pub fn run() {
             {
                 let _ = tray.set_icon_as_template(true);
             }
+
+            let cfg = app.state::<State>().config.lock().unwrap().clone();
+            let _ = apply_tray_state(
+                app.handle(),
+                TrayCounts::default(),
+                cfg.badge_mode,
+                cfg.pause_scanning,
+            );
 
             // Every 60s, --fast only, so it keeps watching with the panel closed
             spawn_badge_watcher(app.handle().clone(), 60);
