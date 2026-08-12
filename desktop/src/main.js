@@ -1,15 +1,16 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-/** @type {any} */
-let doctor = null;
+/** @type {any[]} — one report per monitored repo, in config order */
+let reports = [];
 /** @type {any} */
 let config = null;
 /** @type {any} */
 let selectedSlot = null;
 let pollTimer = null;
 let busy = false;
-let coldOpen = false;
+/** Per repo, so folding one does not fold the others */
+let coldOpen = {};
 let settingsOpen = false;
 let version = null;
 let launchStatus = null;
@@ -43,14 +44,46 @@ function fmtUptime(s) {
   return `${m[1] ?? 1}${unit[m[2].toLowerCase()] || ""}`;
 }
 
-const findings = () => doctor?.findings || [];
+/** Findings across every monitored repo, each tagged with where it came from.
+ *  A finding in the second repo has to reach the badge too — otherwise the icon
+ *  quietly means "the first repo is fine", which is the exact blind spot this
+ *  tool exists to remove. */
+const findings = () =>
+  reports.flatMap((r) => (r.findings || []).map((f) => ({ ...f, _repo: r.repo })));
+const okReports = () => reports.filter((r) => r.ok !== false);
+const failedReports = () => reports.filter((r) => r.ok === false);
+const multiRepo = () => (config?.repos || []).length > 1;
+/** Every slot across every repo, tagged with its owner so two repos can both
+ *  have a "slot 4" without the panel confusing them. */
+const allSlots = () =>
+  okReports().flatMap((r) => (r.slots || []).map((s) => ({ ...s, _repo: r.repo })));
+
+function renderRepoLabel() {
+  const repos = config?.repos || [];
+  const label = $("repo");
+  if (repos.length === 1) {
+    label.textContent = basename(repos[0]);
+    label.title = repos[0];
+  } else if (repos.length === 0) {
+    label.textContent = "—";
+    label.title = "";
+  } else {
+    label.textContent = `${repos.length} repos`;
+    label.title = repos.join("\n");
+  }
+}
 const mutedKinds = () => new Set((config?.mutedKinds || []).filter((k) => k !== "critical"));
 const visibleFindings = () =>
   findings().filter((f) => f.severity === "critical" || !mutedKinds().has(f.kind));
 /** Findings that belong to a slot. unassigned-default is attached to slot 0 but
  *  is not "a problem with slot 0", so it is rendered separately. */
 const findingsFor = (slot) =>
-  visibleFindings().filter((f) => f.slot === slot.slot && f.kind !== "unassigned-default");
+  visibleFindings().filter(
+    (f) =>
+      f.slot === slot.slot &&
+      f._repo === slot._repo &&
+      f.kind !== "unassigned-default",
+  );
 
 function slotDot(slot) {
   const fs = findingsFor(slot);
@@ -140,7 +173,8 @@ function sectionHeader(text, right) {
   return h;
 }
 
-function slotRow(slot) {
+function slotRow(slot, repo) {
+  slot = { ...slot, _repo: slot._repo ?? repo };
   const claimants = slot.claimants || [];
   const name =
     claimants.length === 0
@@ -173,7 +207,7 @@ function slotRow(slot) {
     const b = el("button", "primary", sleep.length === 1 ? `Wake ${sleep[0]}` : "Wake");
     b.addEventListener("click", (e) => {
       e.stopPropagation();
-      lifecycle("wake", slot.slot, sleep.length === 1 ? sleep[0] : null);
+      lifecycle("wake", slot.slot, sleep.length === 1 ? sleep[0] : null, slot._repo);
     });
     actions.appendChild(b);
     row.appendChild(actions);
@@ -206,39 +240,69 @@ function unassignedRow(f) {
 function renderList() {
   const list = $("list");
   list.innerHTML = "";
-  if (!doctor) {
+  if (!reports.length) {
     list.appendChild(el("div", "empty", config?.pauseScanning ? "Scanning paused" : "Scanning…"));
     return;
   }
 
-  const slots = doctor.slots || [];
+  // A repo that could not be scanned gets a visible row rather than vanishing.
+  // Silence and health must never look the same.
+  for (const r of failedReports()) {
+    const row = el("div", "row unassigned");
+    const top = el("div", "row-top");
+    top.appendChild(el("span", "dot warn"));
+    top.appendChild(el("span", "name", basename(r.repo)));
+    row.appendChild(top);
+    row.appendChild(el("div", "row-sub mono", r.error || "could not be scanned"));
+    list.appendChild(row);
+  }
+
+  for (const rep of okReports()) {
+    if (multiRepo()) {
+      const h = sectionHeader(basename(rep.repo).toUpperCase(), rep.layout || "");
+      h.className = "sec repo-head";
+      h.title = rep.repo;
+      list.appendChild(h);
+    }
+    renderRepoSlots(list, rep);
+  }
+}
+
+/** One repo's slots. Identical output to the single-repo layout, so nothing
+ *  changes visually for the common case of watching exactly one. */
+function renderRepoSlots(list, rep) {
+  const slots = rep.slots || [];
   const running = slots.filter((s) => s.running).sort((a, b) => a.slot - b.slot);
   const cold = slots.filter((s) => !s.running && s.slot !== 0).sort((a, b) => a.slot - b.slot);
   const totalMem = running.reduce((a, x) => a + (x.memMiB || 0), 0);
 
   list.appendChild(sectionHeader(`RUNNING ${running.length}`, totalMem ? fmtMem(totalMem) : ""));
   if (!running.length) list.appendChild(el("div", "empty", "No environments running"));
-  for (const s of running) list.appendChild(slotRow(s));
+  for (const s of running) list.appendChild(slotRow(s, rep.repo));
 
-  const unassigned = visibleFindings().find((f) => f.kind === "unassigned-default");
+  const unassigned = visibleFindings().find(
+    (f) => f.kind === "unassigned-default" && f._repo === rep.repo,
+  );
   if (unassigned) list.appendChild(unassignedRow(unassigned));
 
   if (cold.length) {
-    const head = sectionHeader(`${coldOpen ? "▾" : "▸"} STOPPED ${cold.length}`, "");
+    const key = rep.repo;
+    const open = coldOpen[key] ?? false;
+    const head = sectionHeader(`${open ? "▾" : "▸"} STOPPED ${cold.length}`, "");
     head.className = "sec toggle";
     head.addEventListener("click", () => {
-      coldOpen = !coldOpen;
+      coldOpen[key] = !open;
       renderList();
     });
     list.appendChild(head);
-    if (coldOpen) for (const s of cold) list.appendChild(slotRow(s));
+    if (open) for (const s of cold) list.appendChild(slotRow(s, rep.repo));
   }
 }
 
 function renderFindings() {
   const box = $("findings");
   box.innerHTML = "";
-  if (!doctor) {
+  if (!reports.length) {
     box.appendChild(sectionHeader("FINDINGS", ""));
     box.appendChild(el("div", "empty", config?.pauseScanning ? "No current scan" : "Scanning…"));
     return;
@@ -351,7 +415,7 @@ function renderDetail(slot) {
       const act = el("td");
       if (st !== "running" && role !== "?") {
         const b = el("button", "mini", "Wake");
-        b.addEventListener("click", () => lifecycle("wake", slot.slot, role));
+        b.addEventListener("click", () => lifecycle("wake", slot.slot, role, slot._repo));
         act.appendChild(b);
       }
       tr.appendChild(act);
@@ -359,18 +423,22 @@ function renderDetail(slot) {
     }
   }
 
-  $("d-wake").onclick = () => lifecycle("wake", slot.slot, null);
-  $("d-sleep").onclick = () => lifecycle("sleep", slot.slot, null);
+  $("d-wake").onclick = () => lifecycle("wake", slot.slot, null, slot._repo);
+  $("d-sleep").onclick = () => lifecycle("sleep", slot.slot, null, slot._repo);
 }
 
-async function lifecycle(action, slot, role) {
+async function lifecycle(action, slot, role, repo) {
   setStatus(`${action === "wake" ? "Waking" : "Sleeping"} S${slot}${role ? ` ${role}` : ""}…`);
   try {
-    const out = await invoke("run_lifecycle", { action, slot, role: role || null, dryRun: false });
+    const out = await invoke("run_lifecycle", {
+      action, slot, role: role || null, dryRun: false, repo: repo || null,
+    });
     setStatus(String(out).split("\n").filter(Boolean).slice(0, 2).join(" · "));
     await refresh({ full: true });
     if (selectedSlot) {
-      const updated = (doctor?.slots || []).find((s) => s.slot === selectedSlot.slot);
+      const updated = allSlots().find(
+        (s) => s.slot === selectedSlot.slot && s._repo === selectedSlot._repo,
+      );
       if (updated) showDetail(updated);
     }
   } catch (e) {
@@ -393,10 +461,8 @@ async function refresh(opts = {}) {
     config = await invoke("get_config");
     if (config.pauseScanning) {
       stopPoll();
-      doctor = null;
-      const repo = config.repo || "";
-      $("repo").textContent = repo ? basename(repo) : "—";
-      $("repo").title = repo;
+      reports = [];
+      renderRepoLabel();
       renderAlert();
       renderList();
       renderFindings();
@@ -404,16 +470,16 @@ async function refresh(opts = {}) {
       if (settingsOpen) renderSettings();
       return;
     }
-    doctor = await invoke("run_doctor", { fast: !full });
-    const repoName = doctor.repo ? basename(doctor.repo) : basename(config?.repo);
-    $("repo").textContent = repoName || "—";
-    $("repo").title = doctor.repo || config?.repo || "";
+    reports = await invoke("run_doctor", { fast: !full });
+    renderRepoLabel();
     renderAlert();
     renderList();
     renderFindings();
     if (settingsOpen) renderSettings();
     if (selectedSlot) {
-      const updated = (doctor?.slots || []).find((s) => s.slot === selectedSlot.slot);
+      const updated = allSlots().find(
+        (s) => s.slot === selectedSlot.slot && s._repo === selectedSlot._repo,
+      );
       if (updated) selectedSlot = updated;
     }
     updateTrayFromVisible();
@@ -458,33 +524,39 @@ function updateTrayFromVisible() {
   invoke("set_tray_state", {
     critical: visible.filter((f) => f.severity === "critical").length,
     warning: visible.filter((f) => f.severity === "warning").length,
-    running: (doctor?.slots || []).filter((s) => s.running).length,
+    running: allSlots().filter((s) => s.running).length,
   }).catch(() => {});
 }
 
 function renderRepoSettings() {
-  $("settings-repo").textContent = config?.repo || "—";
-  $("settings-layout").textContent = doctor?.layout || "—";
+  $("settings-layout").textContent = okReports().map((r) => r.layout).join(" · ") || "—";
 
-  const recent = $("recent-repos");
-  recent.innerHTML = "";
-  const repos = (config?.recentRepos || []).filter((p) => p && p !== config?.repo);
+  // The monitored set, not a single active repo. Every one of these raises the
+  // badge; a repo you removed stops being watched, which is the whole point of
+  // showing the list rather than hiding it behind a picker.
+  const box = $("recent-repos");
+  box.innerHTML = "";
+  const repos = config?.repos || [];
   if (!repos.length) {
-    recent.appendChild(el("div", "setting-note", "No recent repos yet."));
+    box.appendChild(el("div", "setting-note", "No repos monitored. Add one to start."));
     return;
   }
   for (const repo of repos) {
-    const b = el("button", "recent-repo", repo);
-    b.title = repo;
-    b.addEventListener("click", async () => {
+    const row = el("div", "repo-row");
+    const label = el("span", "repo-path", repo);
+    label.title = repo;
+    row.appendChild(label);
+    const rm = el("button", "mini", "Remove");
+    rm.addEventListener("click", async () => {
       try {
-        config = await invoke("set_repo", { repo });
+        config = await invoke("remove_repo", { repo });
         await refresh({ full: true });
       } catch (e) {
         setStatus(String(e), true);
       }
     });
-    recent.appendChild(b);
+    row.appendChild(rm);
+    box.appendChild(row);
   }
 }
 
@@ -678,7 +750,7 @@ function bind() {
     try {
       config = await invoke("set_pause_scanning", { paused });
       if (paused) {
-        doctor = null;
+        reports = [];
         stopPoll();
         setStatus("Scanning paused");
         renderAlert();

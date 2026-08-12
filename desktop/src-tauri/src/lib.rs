@@ -29,8 +29,14 @@ enum BadgeMode {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct AppConfig {
-    /// Absolute path to monorepo / worktree root for doctor
+    /// Legacy single-repo field. Only read, to migrate an older config once.
+    /// `repos` is the truth; see `load_config`.
     repo: Option<String>,
+    /// Every repo being monitored. A finding in any of them raises the badge —
+    /// a tool whose whole claim is "you cannot see what is silently wrong" must
+    /// not have a blind spot of exactly that shape.
+    #[serde(default)]
+    repos: Vec<String>,
     /// Override path to cli.ts or slotyard binary
     cli: Option<String>,
     /// Poll interval while panel is open (seconds)
@@ -75,14 +81,26 @@ fn load_config() -> AppConfig {
         if let Ok(c) = serde_json::from_str(&raw) {
             let mut cfg: AppConfig = c;
             clean_muted_kinds(&mut cfg);
+            migrate_repos(&mut cfg);
             return cfg;
         }
     }
     AppConfig {
-        repo: default_repo_guess(),
+        repos: default_repo_guess().into_iter().collect(),
         poll_seconds: Some(5),
         ..Default::default()
     }
+}
+
+/// An older config carries a single `repo`. Fold it into `repos` once, then stop
+/// writing it, so there is never a moment with two sources of truth.
+fn migrate_repos(cfg: &mut AppConfig) {
+    if let Some(repo) = cfg.repo.take() {
+        if !cfg.repos.iter().any(|r| r == &repo) {
+            cfg.repos.insert(0, repo);
+        }
+    }
+    cfg.repos.dedup();
 }
 
 fn save_config(cfg: &AppConfig) -> Result<(), String> {
@@ -263,22 +281,29 @@ fn get_config(state: tauri::State<'_, State>) -> AppConfig {
 }
 
 #[tauri::command]
-fn set_repo(state: tauri::State<'_, State>, repo: String) -> Result<AppConfig, String> {
+fn add_repo(state: tauri::State<'_, State>, repo: String) -> Result<AppConfig, String> {
     let path = PathBuf::from(&repo);
     if !path.is_dir() {
         return Err(format!("Not a directory: {repo}"));
     }
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .display()
+        .to_string();
     let mut cfg = state.config.lock().unwrap();
-    let repo_str = Some(
-        path.canonicalize()
-            .map_err(|e| e.to_string())?
-            .display()
-            .to_string(),
-    );
-    cfg.repo = repo_str.clone();
-    if let Some(ref p) = repo_str {
-        remember_repo(p, &mut cfg.recent_repos);
+    if !cfg.repos.iter().any(|r| r == &canonical) {
+        cfg.repos.push(canonical.clone());
     }
+    remember_repo(&canonical, &mut cfg.recent_repos);
+    save_config(&cfg)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn remove_repo(state: tauri::State<'_, State>, repo: String) -> Result<AppConfig, String> {
+    let mut cfg = state.config.lock().unwrap();
+    cfg.repos.retain(|r| r != &repo);
     save_config(&cfg)?;
     Ok(cfg.clone())
 }
@@ -286,10 +311,10 @@ fn set_repo(state: tauri::State<'_, State>, repo: String) -> Result<AppConfig, S
 #[tauri::command]
 fn pick_repo(state: tauri::State<'_, State>) -> Result<AppConfig, String> {
     let folder = rfd::FileDialog::new()
-        .set_title("Select monorepo / worktree root")
+        .set_title("Select a repo to monitor")
         .pick_folder()
         .ok_or_else(|| "cancelled".to_string())?;
-    set_repo(state, folder.display().to_string())
+    add_repo(state, folder.display().to_string())
 }
 
 #[tauri::command]
@@ -532,32 +557,55 @@ fn open_url(url: String) -> Result<(), String> {
 async fn run_doctor(
     state: tauri::State<'_, State>,
     fast: Option<bool>,
-) -> Result<serde_json::Value, String> {
+) -> Result<Vec<serde_json::Value>, String> {
     let cfg = state.config.lock().unwrap().clone();
     if cfg.pause_scanning {
         return Err("Scanning paused.".into());
     }
-    let repo = cfg
-        .repo
-        .clone()
-        .ok_or_else(|| "No repo selected. Choose a monorepo folder.".to_string())?;
-    let cwd = PathBuf::from(&repo);
-    if !cwd.is_dir() {
-        return Err(format!("Repo path missing: {repo}"));
+    if cfg.repos.is_empty() {
+        return Err("No repo selected. Add one in Settings.".into());
     }
     let cli = resolve_cli(&cfg)?;
     let use_fast = fast.unwrap_or(true);
-    let args: Vec<&str> = if use_fast {
-        vec!["--json", "--fast"]
-    } else {
-        vec!["--json"]
-    };
-    let stdout = tauri::async_runtime::spawn_blocking(move || run_node_cli(&cli, &cwd, &args))
-        .await
-        .map_err(|e| format!("join error: {e}"))??;
-    serde_json::from_str(&stdout).map_err(|e| format!("invalid doctor JSON: {e}\n{stdout}"))
+
+    let mut reports = Vec::new();
+    for repo in cfg.repos.iter() {
+        // A repo that cannot be scanned still gets a row. Dropping it would be
+        // the same blind spot this tool exists to remove: the panel would look
+        // healthy because one of the things it watches went quiet.
+        let cwd = PathBuf::from(repo);
+        if !cwd.is_dir() {
+            reports.push(serde_json::json!({
+                "repo": repo, "ok": false, "error": format!("Path missing: {repo}")
+            }));
+            continue;
+        }
+        let cli = cli.clone();
+        let args: Vec<&str> = if use_fast { vec!["--json", "--fast"] } else { vec!["--json"] };
+        let out = tauri::async_runtime::spawn_blocking(move || run_node_cli(&cli, &cwd, &args))
+            .await
+            .map_err(|e| format!("join error: {e}"))?;
+        match out {
+            Ok(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
+                Ok(mut v) => {
+                    v["ok"] = serde_json::Value::Bool(true);
+                    if v["repo"].is_null() {
+                        v["repo"] = serde_json::Value::String(repo.clone());
+                    }
+                    reports.push(v);
+                }
+                Err(e) => reports.push(serde_json::json!({
+                    "repo": repo, "ok": false, "error": format!("invalid doctor JSON: {e}")
+                })),
+            },
+            Err(e) => reports.push(serde_json::json!({ "repo": repo, "ok": false, "error": e })),
+        }
+    }
+    Ok(reports)
 }
 
+/// `repo` says which monitored repo the slot belongs to. With several being
+/// watched, the caller has to name it — guessing would wake somebody else's stack.
 #[tauri::command]
 async fn run_lifecycle(
     state: tauri::State<'_, State>,
@@ -565,14 +613,14 @@ async fn run_lifecycle(
     slot: u32,
     role: Option<String>,
     dry_run: Option<bool>,
+    repo: Option<String>,
 ) -> Result<String, String> {
     if action != "wake" && action != "sleep" {
         return Err("action must be wake or sleep".into());
     }
     let cfg = state.config.lock().unwrap().clone();
-    let repo = cfg
-        .repo
-        .clone()
+    let repo = repo
+        .or_else(|| cfg.repos.first().cloned())
         .ok_or_else(|| "No repo selected".to_string())?;
     let cwd = PathBuf::from(&repo);
     let cli = resolve_cli(&cfg)?;
@@ -686,15 +734,28 @@ fn spawn_badge_watcher(app: AppHandle, every: u64) {
             std::thread::sleep(std::time::Duration::from_secs(every));
             continue;
         }
-        if let (Some(repo), Ok(cli)) = (cfg.repo.clone(), resolve_cli(&cfg)) {
-            let cwd = PathBuf::from(&repo);
-            if cwd.is_dir() {
+        // Sum across every monitored repo. A critical in any one of them has to
+        // colour the icon, or the badge quietly means "the first repo is fine".
+        if let Ok(cli) = resolve_cli(&cfg) {
+            let mut total = TrayCounts::default();
+            let mut scanned_any = false;
+            for repo in cfg.repos.iter() {
+                let cwd = PathBuf::from(repo);
+                if !cwd.is_dir() {
+                    continue;
+                }
                 if let Ok(out) = run_node_cli(&cli, &cwd, &["--json", "--fast"]) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                        let counts = tray_counts_from_doctor(&v, &cfg.muted_kinds);
-                        let _ = apply_tray_state(&app, counts, cfg.badge_mode, false);
+                        let c = tray_counts_from_doctor(&v, &cfg.muted_kinds);
+                        total.critical += c.critical;
+                        total.warning += c.warning;
+                        total.running += c.running;
+                        scanned_any = true;
                     }
                 }
+            }
+            if scanned_any {
+                let _ = apply_tray_state(&app, total, cfg.badge_mode, false);
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(every));
@@ -772,7 +833,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
-            set_repo,
+            add_repo,
+            remove_repo,
             pick_repo,
             get_version,
             set_poll_seconds,

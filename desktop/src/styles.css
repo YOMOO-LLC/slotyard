@@ -769,3 +769,36 @@ button:disabled {
   opacity: 0.4;
   cursor: default;
 }
+
+/* Monitored repos: a list you can remove from, not a picker that hides the set */
+.repo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.repo-row:last-child { border-bottom: none; }
+
+.repo-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+/* Which repo a group of slots belongs to. Only rendered when more than one is
+   monitored, so a single-repo panel looks exactly as it did before. */
+.sec.repo-head {
+  color: var(--accent);
+  border-top: 0.5px solid rgba(255, 255, 255, 0.1);
+  margin-top: 6px;
+  padding-top: 12px;
+}
