@@ -38,24 +38,58 @@ export type Container = {
   /** State from docker ps -a. sleep / partial-stack detection reads this, not
    *  just whether the status line starts with Up. */
   state: ContainerState;
+  /** Host path docker exposes for this container, if any — compose
+   *  `working_dir` or a bind-mount Source. Another clone of the same
+   *  project_id is how silent database sharing happens across repos; this is
+   *  the only probe that can tell that clone from a worktree in *this* repo.
+   *  Absent when docker does not stamp a path (common for named volumes). */
+  workDir?: string | null;
 };
 
+/** docker Names are tab-free; inspect .Name is prefixed with `/`. */
+function bareName(name: string): string {
+  return name.replace(/^\//, '');
+}
+
+/** Compose stamps the project directory on every service. Empty / `<no value>`
+ *  means docker did not stamp one — leave null rather than inventing a path. */
+function composeWorkDir(workingDir?: string, projectDir?: string): string | null {
+  for (const raw of [workingDir, projectDir]) {
+    if (!raw || raw === '<no value>') continue;
+    const t = raw.trim();
+    if (t) return t;
+  }
+  return null;
+}
+
+function firstBindSource(mounts: { Type?: string; Source?: string }[] | null): string | null {
+  for (const m of mounts ?? []) {
+    if (m.Type === 'bind' && m.Source?.startsWith('/')) return m.Source;
+  }
+  return null;
+}
+
 /** docker ps -a, plus an optional docker stats. stats is slow on a machine with
- *  many containers, so UI polling should skip it. */
+ *  many containers, so UI polling should skip it. Prefer { stats: false } and
+ *  attachStats(mine) after filtering — docker is machine-wide and stats on the
+ *  unfiltered list is the slow step we used to pay for foreign projects. */
 export async function probeContainers(
   labelKey: string,
   opts: { stats?: boolean } = {},
 ): Promise<Container[]> {
   const wantStats = opts.stats !== false;
+  // Extra compose-dir columns after the original five. Names contain no tabs,
+  // so splitting on \t does not break the existing parse if a column is empty.
   const psOut = await run('docker', [
     'ps', '-a', '--no-trunc',
-    '--format', `{{.Names}}\t{{.Label "${labelKey}"}}\t{{.RunningFor}}\t{{.State}}\t{{.Status}}`,
+    '--format',
+    `{{.Names}}\t{{.Label "${labelKey}"}}\t{{.RunningFor}}\t{{.State}}\t{{.Status}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.project.dir"}}`,
   ]);
 
   const containers: Container[] = [];
   for (const line of psOut.split('\n')) {
     if (!line.trim()) continue;
-    const [name, label, uptime, stateRaw, status] = line.split('\t');
+    const [name, label, uptime, stateRaw, status, workingDir, projectDir] = line.split('\t');
     const state: ContainerState =
       stateRaw === 'running' ? 'running' : stateRaw === 'exited' ? 'exited' : 'other';
     containers.push({
@@ -66,24 +100,30 @@ export async function probeContainers(
       memMiB: null,
       cpuPct: null,
       state,
+      workDir: composeWorkDir(workingDir, projectDir),
     });
   }
-  if (containers.length === 0 || !wantStats) return containers;
+  if (wantStats) await attachStats(containers);
+  return containers;
+}
 
-  // stats only means anything for running containers, and it is the one slow
-  // step here — seconds to tens of seconds once there are a lot of containers.
+/** docker stats --no-stream on the running members of this list only. Mutates
+ *  in place. Doctor must call this on the layout-filtered set, never on the
+ *  machine-wide probeContainers result — stats is the slow step. */
+export async function attachStats(containers: Container[]): Promise<void> {
   const running = containers.filter(c => c.state === 'running');
-  if (running.length === 0) return containers;
+  if (running.length === 0) return;
   try {
     const statsOut = await run('docker', [
       'stats', '--no-stream', '--format', '{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}',
       ...running.map(c => c.name),
     ]);
-    const byName = new Map(containers.map(c => [c.name, c]));
+    const byName = new Map<string, Container>();
+    for (const c of containers) byName.set(bareName(c.name), c);
     for (const line of statsOut.split('\n')) {
       if (!line.trim()) continue;
       const [name, mem, cpu] = line.split('\t');
-      const c = byName.get(name);
+      const c = byName.get(bareName(name ?? ''));
       if (!c) continue;
       c.memMiB = parseMem(mem);
       c.cpuPct = parseFloat(cpu) || 0;
@@ -92,7 +132,50 @@ export async function probeContainers(
     // A stats failure must not take the whole doctor down. An empty memory
     // column is a fine degradation.
   }
-  return containers;
+}
+
+/** Fill workDir for containers the cheap ps labels missed. Inspects only the
+ *  given list (doctor passes `mine`). Needed even on --fast: another clone of
+ *  the same project_id is how silent database sharing happens, and that path
+ *  is how analyze tells that clone from a worktree in this repo. */
+export async function attachWorkDirs(containers: Container[]): Promise<void> {
+  const need = containers.filter(c => !c.workDir);
+  if (need.length === 0) return;
+  try {
+    const raw = await run('docker', [
+      'inspect',
+      ...need.map(c => c.name),
+      '--format', '{{.Name}}\t{{json .Config.Labels}}\t{{json .Mounts}}',
+    ]);
+    const byName = new Map<string, Container>();
+    for (const c of need) byName.set(bareName(c.name), c);
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      const tab = line.indexOf('\t');
+      if (tab < 0) continue;
+      const name = bareName(line.slice(0, tab));
+      const rest = line.slice(tab + 1);
+      const tab2 = rest.indexOf('\t');
+      if (tab2 < 0) continue;
+      const c = byName.get(name);
+      if (!c || c.workDir) continue;
+      let labels: Record<string, string> | null = null;
+      let mounts: { Type?: string; Source?: string }[] | null = null;
+      try {
+        labels = JSON.parse(rest.slice(0, tab2));
+        mounts = JSON.parse(rest.slice(tab2 + 1));
+      } catch {
+        continue;
+      }
+      c.workDir = composeWorkDir(
+        labels?.['com.docker.compose.project.working_dir'],
+        labels?.['com.docker.compose.project.dir'],
+      ) ?? firstBindSource(mounts);
+    }
+  } catch {
+    // Inspect failure must not take doctor down; workDir stays null and
+    // analyze degrades to not knowing the clone.
+  }
 }
 
 function parseMem(usage: string): number | null {
@@ -155,22 +238,35 @@ export async function probeIdentities(
 
   const { createHash } = await import('node:crypto');
   const out: { projectId: string; jwtFingerprint: string; siteUrl: string }[] = [];
+  // projectId comes from the already-probed Container, not from a hardcoded
+  // label key — docker is machine-wide and the label is a stack convention.
+  const byName = new Map(targets.map(t => [bareName(t.name), t]));
   try {
-    // One JSON object per line: env values can contain spaces and even newlines,
-    // so JSON is the only safe delimiter here.
+    // Name + JSON Config: env values can contain spaces and even newlines,
+    // so JSON is the only safe delimiter for the env blob. inspect .Name is
+    // prefixed with `/`; strip it to join on the docker-ps name.
     const raw = await run('docker', [
-      'inspect', ...targets.map(t => t.name), '--format', '{{json .Config}}',
+      'inspect', ...targets.map(t => t.name), '--format', '{{.Name}}\t{{json .Config}}',
     ]);
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
-      const cfg = JSON.parse(line) as { Labels?: Record<string, string>; Env?: string[] };
-      const projectId = cfg.Labels?.['com.supabase.cli.project'];
+      const tab = line.indexOf('\t');
+      if (tab < 0) continue;
+      const target = byName.get(bareName(line.slice(0, tab)));
+      const projectId = target?.projectId;
+      if (!projectId) continue;
+      let cfg: { Env?: string[] };
+      try {
+        cfg = JSON.parse(line.slice(tab + 1)) as { Env?: string[] };
+      } catch {
+        continue;
+      }
       const env = new Map((cfg.Env ?? []).map(l => {
         const i = l.indexOf('=');
         return [l.slice(0, i), l.slice(i + 1)] as [string, string];
       }));
       const secret = env.get('GOTRUE_JWT_SECRET');
-      if (!projectId || !secret) continue;
+      if (!secret) continue;
       out.push({
         projectId,
         jwtFingerprint: createHash('sha256').update(secret).digest('hex').slice(0, 16),

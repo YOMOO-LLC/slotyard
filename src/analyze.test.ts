@@ -108,6 +108,8 @@ test('containers with no declaration are unclaimed', () => {
     .find(x => x.kind === 'unclaimed')!;
   assert.ok(f);
   assert.equal(f.slot, 11);
+  assert.match(f.suggestion!, /another clone/);
+  assert.ok(!/docker rm/.test(f.suggestion!), 'a running unclaimed stack must never offer docker rm');
 });
 
 test('a declaration with no environment behind it is a phantom', () => {
@@ -250,8 +252,8 @@ test('collision and unassigned-default suggestions are paste-ready commands', ()
     .find(x => x.kind === 'collision')!;
   assert.ok(c.suggestion);
   assert.match(c.suggestion!, /keep alpha/);
-  assert.match(c.suggestion!, /cd \/beta && rm \.wt-slot && tools\/wt-supabase-lifecycle\.sh up/);
-  assert.match(c.suggestion!, /starts the stack/);
+  assert.match(c.suggestion!, /cd '\/beta' && rm -f \.wt-slot && slotyard alloc/);
+  assert.match(c.suggestion!, /start the stack/);
 
   const un = [
     decl(MAIN, 'example-app'),
@@ -263,9 +265,72 @@ test('collision and unassigned-default suggestions are paste-ready commands', ()
   assert.ok(u.suggestion);
   // unallocated worktrees usually have no registry file, so do not tell the
   // user to remove one
-  assert.match(u.suggestion!, /cd \/wt-a && tools\/wt-supabase-lifecycle\.sh up/);
-  assert.match(u.suggestion!, /cd \/wt-b && tools\/wt-supabase-lifecycle\.sh up/);
+  assert.match(u.suggestion!, /cd '\/wt-a' && slotyard alloc/);
+  assert.match(u.suggestion!, /cd '\/wt-b' && slotyard alloc/);
   assert.ok(!/rm \.wt-slot/.test(u.suggestion!));
+});
+
+test('suggestion cd quotes a worktree path that contains spaces', () => {
+  const collide = [
+    decl('/alpha', 'example-app-s4'),
+    decl('/wt/my feature', 'example-app-s4'),
+  ];
+  const c = analyze(input({ declarations: collide, worktrees: collide.map(d => d.worktree) })).findings
+    .find(x => x.kind === 'collision')!;
+  assert.match(c.suggestion!, /cd '\/wt\/my feature'/);
+  assert.ok(!/cd \/wt\/my feature/.test(c.suggestion!), 'an unquoted cd would break on the space');
+});
+
+test('default suggestions mention slotyard alloc and configPath, not a lifecycle script', () => {
+  const collide = [
+    decl('/beta', 'example-app-s4'),
+    decl('/alpha', 'example-app-s4'),
+  ];
+  const c = analyze(input({ declarations: collide, worktrees: collide.map(d => d.worktree) })).findings
+    .find(x => x.kind === 'collision')!;
+  assert.match(c.suggestion!, /slotyard alloc/);
+  assert.match(c.suggestion!, /apps\/web\/supabase\/config\.toml/);
+  assert.match(c.suggestion!, /supabase CLI reads that file/);
+  assert.ok(!/wt-supabase-lifecycle\.sh/.test(c.suggestion!));
+  assert.ok(!/tools\/lifecycle/.test(c.suggestion!));
+
+  const un = [
+    decl(MAIN, 'example-app'),
+    decl('/wt-a', 'example-app'),
+    decl('/wt-b', 'example-app'),
+  ];
+  const u = analyze(input({ declarations: un, worktrees: un.map(d => d.worktree) })).findings
+    .find(x => x.kind === 'unassigned-default')!;
+  assert.match(u.suggestion!, /slotyard alloc/);
+  assert.match(u.suggestion!, /apps\/web\/supabase\/config\.toml/);
+  assert.ok(!/wt-supabase-lifecycle\.sh/.test(u.suggestion!));
+  assert.ok(!/tools\/lifecycle/.test(u.suggestion!));
+});
+
+test('layout.fixUp is used in suggestions when present', () => {
+  const layout = { ...exampleLayout, fixUp: './tools/up.sh' };
+  const collide = [
+    decl('/beta', 'example-app-s4'),
+    decl('/alpha', 'example-app-s4'),
+  ];
+  const c = analyze(input({
+    layout, declarations: collide, worktrees: collide.map(d => d.worktree),
+  })).findings.find(x => x.kind === 'collision')!;
+  assert.match(c.suggestion!, /cd '\/beta' && rm -f \.wt-slot && \.\/tools\/up\.sh/);
+  assert.ok(!c.suggestion!.includes('/beta && ./tools/up.sh'), 'fixUp must not have the path interpolated into it');
+
+  const un = [
+    decl(MAIN, 'example-app'),
+    decl('/wt-a', 'example-app'),
+    decl('/wt-b', 'example-app'),
+  ];
+  const u = analyze(input({
+    layout, declarations: un, worktrees: un.map(d => d.worktree),
+  })).findings.find(x => x.kind === 'unassigned-default')!;
+  assert.match(u.suggestion!, /cd '\/wt-a' && \.\/tools\/up\.sh/);
+  assert.match(u.suggestion!, /cd '\/wt-b' && \.\/tools\/up\.sh/);
+  assert.ok(!/rm -f \.wt-slot/.test(u.suggestion!), 'unassigned still does not rm the registry');
+  assert.ok(!/slotyard alloc/.test(u.suggestion!), 'fixUp replaces the generic alloc steps');
 });
 
 test('volumeBelongsTo: the default project_id does not swallow its -sN siblings', () => {
@@ -275,6 +340,17 @@ test('volumeBelongsTo: the default project_id does not swallow its -sN siblings'
   );
   assert.equal(
     exampleLayout.stack.volumeBelongsTo('supabase_db_example-app-s2', 'example-app-s2'),
+    true,
+  );
+});
+
+test('volumeBelongsTo: prefix id "app" does not match volume "..._myapp"', () => {
+  assert.equal(
+    exampleLayout.stack.volumeBelongsTo('supabase_db_myapp', 'app'),
+    false,
+  );
+  assert.equal(
+    exampleLayout.stack.volumeBelongsTo('supabase_db_myapp', 'myapp'),
     true,
   );
 });
@@ -295,6 +371,19 @@ test('the unallocated suggestion lists only actionable worktrees, never temp dir
   assert.ok(u.suggestion!.includes('/workspaces/demo/real-a'));
   assert.ok(u.suggestion!.includes('/workspaces/demo/real-b'));
   assert.ok(!u.suggestion!.includes('/private/tmp'), 'a temp directory must not appear in a fix command');
+});
+
+test('a live sibling under a shared parent is foreign-port, not orphan-port', () => {
+  const wts = [wt('/hub/a'), wt('/hub/b')];
+  const sibling: Listener = { port: 8221, pid: 2, command: 'node', cwd: '/hub/other-project' };
+  const f = analyze(input({
+    mainRoot: '/hub/main',
+    worktrees: wts,
+    listeners: [sibling],
+    pathExists: () => true,
+  })).findings;
+  assert.ok(f.some(x => x.kind === 'foreign-port'), 'a live tree under the shared parent is another project');
+  assert.ok(!f.some(x => x.kind === 'orphan-port'), 'orphan-port is for deleted leftovers, not a path that still exists');
 });
 
 test('a listener alone conjures no slot row; a shared-parent cwd is orphan-port', () => {
@@ -389,6 +478,39 @@ test('orphan: the worktree is gone but the data remains, and it is stopped', () 
 // A declared cold environment is one the user is deliberately keeping. Reporting
 // it as an orphan is the only direction this check can be wrong in, and being
 // wrong once means somebody deletes their own database.
+test('orphan: a foreign workDir is another clone, never a paste-ready docker rm', () => {
+  const orphan = analyze(input({
+    worktrees: [wt(MAIN)],
+    declarations: [decl(MAIN, 'example-app')],
+    containers: [{ ...container('example-app-s7', undefined, 'exited'), workDir: '/other/clone' }],
+    volumes: ['supabase_db_example-app-s7'],
+  }));
+  const f = orphan.findings.find(x => x.kind === 'orphan-data');
+  assert.ok(f);
+  assert.match(f!.evidence.join('\n'), /\/other\/clone/);
+  assert.match(f!.evidence.join('\n'), /another clone/);
+  assert.ok(!/docker rm/.test(f!.suggestion!));
+  assert.ok(!/volume rm/.test(f!.suggestion!));
+});
+
+test('orphan: unknown workDir still warns, inspect comes before any rm', () => {
+  const orphan = analyze(input({
+    worktrees: [wt(MAIN)],
+    declarations: [decl(MAIN, 'example-app')],
+    containers: [container('example-app-s7', undefined, 'exited')],
+    volumes: ['supabase_db_example-app-s7'],
+  }));
+  const f = orphan.findings.find(x => x.kind === 'orphan-data');
+  assert.ok(f);
+  assert.equal(f!.severity, 'warning');
+  assert.match(f!.suggestion!, /another clone/);
+  const inspectAt = f!.suggestion!.search(/docker (volume )?inspect/);
+  const rmAt = f!.suggestion!.search(/docker rm|volume rm/);
+  assert.ok(inspectAt >= 0, 'must inspect first');
+  assert.ok(rmAt >= 0, 'unknown may still offer deletion, but last');
+  assert.ok(inspectAt < rmAt, 'never lead with docker rm');
+});
+
 test('orphan: a cold environment with a claimant is not an orphan', () => {
   const cold = analyze(input({
     worktrees: [wt(MAIN), wt('/wt/alpha')],

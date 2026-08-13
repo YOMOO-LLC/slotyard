@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import { resolveLayout } from './layouts/discover.ts';
-import { probeContainers, probeWorktrees, probeListeners, probeIdentities, probeVolumes, probeReservedPorts } from './probe.ts';
+import { probeContainers, probeWorktrees, probeListeners, probeIdentities, probeVolumes, probeReservedPorts, attachStats, attachWorkDirs } from './probe.ts';
 import { readDeclarations } from './declarations.ts';
 import { analyze } from './analyze.ts';
 import { chooseSlot, occupiedSlots, ownerRoot, portBlockedSlots } from './allocate.ts';
@@ -82,9 +83,10 @@ async function runDoctor(doctorArgs: string[]) {
   const layout = resolved.layout;
 
   // --fast skips stats (the slow one), the lsof port sweep and the auth inspect.
-  // Intended for UI polling.
+  // Intended for UI polling. Stats stay off here on purpose: docker is
+  // machine-wide, and we only want stats for `mine` after the layout filter.
   const [containers, listeners, declarations, volumes] = await Promise.all([
-    probeContainers(layout.stack.labelKey, { stats: !fast }),
+    probeContainers(layout.stack.labelKey, { stats: false }),
     fast ? Promise.resolve([]) : probeListeners(),
     readDeclarations(worktrees, layout),
     probeVolumes(),
@@ -97,15 +99,23 @@ async function runDoctor(doctorArgs: string[]) {
   // Narrow once here, so nothing downstream can see foreign containers.
   const mine = containers.filter(c => c.projectId && layout.slotFromProjectId(c.projectId) !== null);
 
-  const identities = fast
-    ? []
-    : await probeIdentities(
+  // workDir even on --fast: inspect of OUR list only, so a foreign clone of the
+  // same project_id is not reported as an orphan of this repo. Stats stay gated.
+  const identitiesP = fast
+    ? Promise.resolve([])
+    : probeIdentities(
       mine,
       n => layout.stack.roleFromContainer(n, mine.find(c => c.name === n)?.projectId ?? '') === 'auth',
     );
+  const [identities] = await Promise.all([
+    identitiesP,
+    fast ? Promise.resolve() : attachStats(mine),
+    attachWorkDirs(mine),
+  ]);
 
   const { slots, findings } = analyze({
     layout, mainRoot, worktrees, containers: mine, listeners, declarations, identities, volumes,
+    pathExists: existsSync,
   });
 
   if (flag('--json')) {
@@ -183,6 +193,11 @@ async function runAlloc(rest: string[]) {
     probeListeners(),
     probeReservedPorts(),
   ]);
+  // workDir on this layout's containers: alloc must not hand back a slot whose
+  // stack lives in another clone. Inspect of the filtered list only.
+  await attachWorkDirs(
+    containers.filter(c => c.projectId && layout.slotFromProjectId(c.projectId) !== null),
+  );
   const blockedPorts = new Map(reserved);
   for (const l of listeners) {
     // Ports bound by docker are covered by the container-binding source, which
@@ -226,7 +241,7 @@ async function runLifecycle(action: 'wake' | 'sleep', rest: string[]) {
   const layout = resolved.layout;
 
   // wake / sleep need neither stats nor lsof — just the container list
-  const containers = await probeContainers(layout.stack.labelKey);
+  const containers = await probeContainers(layout.stack.labelKey, { stats: false });
   const plan = action === 'wake'
     ? planWake({ layout, containers, slots: parsed.slots, roles: parsed.roles })
     : planSleep({ layout, containers, slots: parsed.slots, roles: parsed.roles });

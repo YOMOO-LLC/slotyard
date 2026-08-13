@@ -168,6 +168,26 @@ test('allocation skips a slot whose ports are held', () => {
   assert.equal(slot, 3, 'slot 1 has containers, slot 2 is port-blocked, so 3');
 });
 
+test('chooseSlot does not reinforce a foreign clone\'s slot', () => {
+  const slot = chooseSlot({
+    ...base,
+    cwd: '/wt/alpha',
+    declarations: [decl('/wt/alpha', 'example-app-s9')],
+    containers: [{ ...cont('example-app-s9'), name: 'example-app-s9', workDir: '/other/clone' }],
+  });
+  assert.notEqual(slot, 9, 'workDir is another clone; handing 9 back would share its database');
+});
+
+test('chooseSlot still returns mine when the container workDir is this worktree', () => {
+  const slot = chooseSlot({
+    ...base,
+    cwd: '/wt/alpha',
+    declarations: [decl('/wt/alpha', 'example-app-s9')],
+    containers: [{ ...cont('example-app-s9'), name: 'example-app-s9', workDir: '/wt/alpha' }],
+  });
+  assert.equal(slot, 9);
+});
+
 // My own stack is of course holding my own ports; counting that as "taken" would
 // renumber me on every call.
 test('the idempotent path is unaffected by my own ports', () => {

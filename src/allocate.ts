@@ -34,6 +34,20 @@ export type AllocInput = {
 
 const isMine = (path: string, cwd: string) => path === cwd;
 
+/** True when every probed workDir on this slot sits outside this repo's roots.
+ *  No workDir at all is unknown, not foreign — keep today's idempotent reuse.
+ *  Path boundaries match ownerRoot, so `/wt/alpha` does not claim `/wt/alpha-2`. */
+function slotHeldByForeignClone(input: AllocInput, slot: number): boolean {
+  const { layout, mainRoot, containers, declarations } = input;
+  const dirs = containers
+    .filter(c => c.projectId != null && layout.slotFromProjectId(c.projectId) === slot)
+    .map(c => c.workDir)
+    .filter((d): d is string => typeof d === 'string' && d.length > 0);
+  if (dirs.length === 0) return false;
+  const roots = [mainRoot, ...declarations.map(d => d.worktree.path)];
+  return dirs.every(d => !roots.includes(ownerRoot(d, roots)));
+}
+
 /**
  * Which worktree a cwd belongs to. Callers are rarely standing at a worktree
  * root — config.toml itself usually lives a few directories down.
@@ -119,10 +133,12 @@ export function chooseSlot(input: AllocInput): number | null {
   const occ = occupiedSlots(input);
 
   // Idempotence: if my own config.toml already holds a number and nobody ELSE
-  // declares it, hand back the same one. Only other people's declarations count
-  // here, not containers — containers running under my project_id are mine by
-  // definition, and treating them as "taken" would change my number on every
-  // call, rebuilding the stack for nothing and moving all its ports.
+  // in THIS repo declares it, hand back the same one. Containers with no
+  // workDir still count as mine — unknown is not foreign. But two clones of
+  // the same project_id share one docker name: if every workDir on this slot
+  // sits outside our roots, returning mine would keep handing out the other
+  // clone's slot and silently share its database. Fall through so occupiedSlots
+  // (containers still count) hands out a different number.
   const mine = declarations.find(d => isMine(d.worktree.path, cwd))?.effective?.slot;
   const declaredByOthers = new Set(
     declarations
@@ -131,7 +147,9 @@ export function chooseSlot(input: AllocInput): number | null {
   );
   // The idempotent path skips the port check: my own stack is of course holding
   // my own ports.
-  if (mine != null && mine > 0 && !declaredByOthers.has(mine)) return mine;
+  if (mine != null && mine > 0 && !declaredByOthers.has(mine) && !slotHeldByForeignClone(input, mine)) {
+    return mine;
+  }
 
   const blocked = portBlockedSlots(input);
   const free = (s: number) => !occ.has(s) && !blocked.has(s);

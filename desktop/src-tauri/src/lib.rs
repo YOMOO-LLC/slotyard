@@ -721,6 +721,10 @@ fn set_tray_state(app: AppHandle, critical: u32, warning: u32, running: u32) -> 
 /// The badge cannot depend on the hidden webview. WebKit freezes its timers as
 /// soon as the panel closes — and "know without opening it" is the only reason
 /// this icon exists. So the scan runs here instead.
+///
+/// Full doctor every 60s, not `--fast`: `--fast` skips identity (JWT fingerprint)
+/// and port probes — the silent-contamination cases the icon exists to surface.
+/// Stats are the expensive part; 60s is the budget.
 fn spawn_badge_watcher(app: AppHandle, every: u64) {
     std::thread::spawn(move || loop {
         let (cfg, last_counts) = {
@@ -744,7 +748,7 @@ fn spawn_badge_watcher(app: AppHandle, every: u64) {
                 if !cwd.is_dir() {
                     continue;
                 }
-                if let Ok(out) = run_node_cli(&cli, &cwd, &["--json", "--fast"]) {
+                if let Ok(out) = run_node_cli(&cli, &cwd, &["--json"]) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
                         let c = tray_counts_from_doctor(&v, &cfg.muted_kinds);
                         total.critical += c.critical;
@@ -916,7 +920,8 @@ pub fn run() {
                 cfg.pause_scanning,
             );
 
-            // Every 60s, --fast only, so it keeps watching with the panel closed
+            // Full scan every 60s so identity and port findings can colour the badge.
+            // Stats are the expensive part; 60s is the budget.
             spawn_badge_watcher(app.handle().clone(), 60);
 
             let h = app.handle().clone();

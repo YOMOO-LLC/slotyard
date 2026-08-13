@@ -23,6 +23,11 @@ export type LayoutSpec = {
   step?: number;
   maxSlot?: number;
   registryFile?: string;
+  /** Optional paste-ready command to bring a worktree up, declared in
+   *  `.slotyard.json`. Convention, not state: slotyard never runs it, and
+   *  suggestions `cd` to the worktree first rather than interpolating the
+   *  path into this string. */
+  fixUp?: string;
 };
 
 const DEFAULT_STEP = 10;
@@ -67,6 +72,8 @@ export function makeLayout(spec: LayoutSpec): Layout {
       for (const [role, base] of Object.entries(spec.ports)) ports[role] = base + slot * step;
       return { projectId: slot === 0 ? spec.prefix : `${spec.prefix}-s${slot}`, ports };
     },
+
+    fixUp: spec.fixUp,
 
     registry: {
       file: spec.registryFile ?? '.wt-slot',

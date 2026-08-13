@@ -27,12 +27,14 @@ slotyard · myapp                            layout: myapp (.slotyard.json)
           feature-audit
         → Fix (keep feature-audit, reassign the rest; basis: containers are
           running, so ownership cannot be traced back from a container):
-           cd /workspaces/feature-import && rm .wt-slot && tools/lifecycle.sh up
+           cd '/workspaces/feature-import' && rm -f .wt-slot && slotyard alloc
+           set project_id in supabase/config.toml (supabase CLI reads that file)
+           and start the stack from this worktree
 
   WARN  SLOT=8 still holds 3 volumes but no worktree claims it
-        containers Exited (137) 5 hours ago
-        docker sees these as in-use (their own exited containers reference them)
-        and will never prune them
+        naming matches this project but no worktree in this repo claims it;
+        it may belong to another clone
+        Inspect first, then containers first / volumes last only if abandoned
 ```
 
 ## Why docker cannot tell you this itself
@@ -137,8 +139,10 @@ inferred:
 ```
 
 Those are your app's own ports; supabase's config knows nothing about them.
-Everything else — `prefix`, `configPath`, `step`, `maxSlot` — is optional and
-overrides what was inferred.
+Everything else — `prefix`, `configPath`, `step`, `maxSlot`, `fixUp` — is optional
+and overrides what was inferred. `fixUp` is the paste-ready command to run after
+`cd` into a worktree (doctor never runs it). Without it, suggestions use
+`slotyard alloc` and tell you to edit `config.toml`.
 
 > A spec declares **conventions** (what the port formula is), never **state**
 > (who currently holds slot 7). Conventions are decisions and belong in files.
@@ -170,7 +174,7 @@ write paths, and they change container state, never data.
 ## Development
 
 ```bash
-node --test src/*.test.ts src/layouts/*.test.ts   # 54 unit tests, no docker needed
+node --test src/*.test.ts src/layouts/*.test.ts   # 64 unit tests, no docker needed
 test/e2e.sh                                       # 12 assertions against real docker
 ```
 

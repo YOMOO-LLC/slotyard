@@ -96,6 +96,12 @@ test('expect and slotFromPort are inverses of each other', () => {
   }
 });
 
+test('makeLayout copies fixUp through from the spec', () => {
+  const l = makeLayout({ ...spec, fixUp: './tools/up.sh' });
+  assert.equal(l.fixUp, './tools/up.sh');
+  assert.equal(makeLayout(spec).fixUp, undefined);
+});
+
 test('mergeSpec lets explicit config win, and merges ports rather than replacing', () => {
   const m = mergeSpec(
     { name: 'i', prefix: 'my-app', configPath: 'a', ports: { api: 54321, db: 54322 } },

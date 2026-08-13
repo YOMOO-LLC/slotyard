@@ -46,6 +46,10 @@ export type Layout = {
     parse(content: string): { slot: number; ports: Record<string, number>; projectId?: string } | null;
   };
 
+  /** Optional paste-ready up command from `.slotyard.json`. Convention, not
+   *  state — doctor never runs it, and suggestions `cd` first rather than
+   *  interpolating a path into this string. */
+  fixUp?: string;
 };
 
 export const SUPABASE_STACK: Stack = {
@@ -57,9 +61,12 @@ export const SUPABASE_STACK: Stack = {
     return m ? m[1] : null;
   },
   // Observed volume names: supabase_db_<projectId> / supabase_storage_<projectId> …
-  // endsWith, so the default id (no -sN suffix) does not swallow its suffixed siblings.
+  // The underscore is the separator supabase actually uses. endsWith(projectId)
+  // alone lets prefix `app` match `supabase_db_myapp`, and lets the default id
+  // (no -sN suffix) swallow its suffixed siblings. Requiring '_' + projectId
+  // closes both.
   volumeBelongsTo(volumeName, projectId) {
-    return volumeName.endsWith(projectId);
+    return volumeName.endsWith('_' + projectId);
   },
 };
 

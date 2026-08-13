@@ -48,6 +48,10 @@ export type Input = {
   declarations: Declaration[];
   identities: Identity[];
   volumes: string[];
+  /** Caller-probed: does this path exist on disk? Analyze stays pure and
+   *  never imports fs. Omitted means unknown, which keeps today's
+   *  orphan-port behaviour for family-hub leftovers. */
+  pathExists?: (path: string) => boolean;
 };
 
 export function analyze(input: Input): { slots: SlotView[]; findings: Finding[] } {
@@ -133,6 +137,27 @@ function isUnder(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith('/') ? root : root + '/');
 }
 
+/** workDir missing is unknown, not proven foreign. Prefix matching of
+ *  project_id is not identity — two clones share one docker name. */
+function containerInThisRepo(c: Container, mainRoot: string, worktrees: Worktree[]): boolean | null {
+  if (!c.workDir) return null;
+  return isUnder(c.workDir, mainRoot) || worktrees.some(w => isUnder(c.workDir!, w.path));
+}
+
+function foreignWorkDirs(containers: Container[], mainRoot: string, worktrees: Worktree[]): string[] {
+  const seen = new Set<string>();
+  for (const c of containers) {
+    if (containerInThisRepo(c, mainRoot, worktrees) === false) seen.add(c.workDir!);
+  }
+  return [...seen];
+}
+
+/** POSIX single-quote wrapping. Worktree paths are data and can contain
+ *  spaces; an unquoted `cd` would split them. */
+function shellQuote(path: string): string {
+  return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
 /** Parent directories shared by several worktrees */
 function familyHubs(mainRoot: string, worktrees: Worktree[]): string[] {
   const counts = new Map<string, number>();
@@ -182,25 +207,36 @@ function isActionableWorktree(w: Worktree): boolean {
 /**
  * A paste-ready reassignment command.
  *
- * Assumes the project's own lifecycle script, where `up` writes the registry
- * file, rewrites config.toml and starts the stack. Such scripts are usually
- * idempotent by reusing the existing registry file — which means a collision has
- * to remove it first, or the same number comes back.
+ * Collision has to remove the registry file first: a caller script that
+ * reuses an existing number would hand the colliding slot back. The project's
+ * own `fixUp` (if declared) is a convention, not a built-in lifecycle — that
+ * script belonged to another repo.
  */
-function reassignCmd(absPath: string): string {
-  return `cd ${absPath} && rm .wt-slot && tools/wt-supabase-lifecycle.sh up`;
+function reassignCmd(absPath: string, layout: Layout): string {
+  const cd = `cd ${shellQuote(absPath)}`;
+  const rm = `rm -f ${layout.registry.file}`;
+  if (layout.fixUp) return `${cd} && ${rm} && ${layout.fixUp}`;
+  return `${cd} && ${rm} && slotyard alloc`;
 }
 
 /** An unallocated worktree usually has no registry file at all, so telling the
- *  user to remove one would just confuse. Plain `up` allocates. */
-function assignCmd(absPath: string): string {
-  return `cd ${absPath} && tools/wt-supabase-lifecycle.sh up`;
+ *  user to remove one would just confuse. */
+function assignCmd(absPath: string, layout: Layout): string {
+  const cd = `cd ${shellQuote(absPath)}`;
+  if (layout.fixUp) return `${cd} && ${layout.fixUp}`;
+  return `${cd} && slotyard alloc`;
+}
+
+function defaultStackNote(layout: Layout): string {
+  if (layout.fixUp) return '';
+  return `   set project_id in ${layout.configPath} (supabase CLI reads that file) and start the stack from this worktree`;
 }
 
 function collisionSuggestion(
   claimants: Declaration[],
   active: boolean,
   name: (p: string) => string,
+  layout: Layout,
 ): string {
   // Ownership cannot be traced back from a container, so there is no better
   // basis than a stable one: keep the lexicographically first path either way.
@@ -212,13 +248,14 @@ function collisionSuggestion(
     : 'none running, keeping the lexicographically first path';
   const lines = [
     `Fix (keep ${name(keep.worktree.path)}, reassign the rest; basis: ${basis}):`,
-    ...rest.map(d => `   ${reassignCmd(d.worktree.path)}`),
-    '   (up starts the stack; add WT_SKIP_SUPABASE=1 to allocate only)',
+    ...rest.map(d => `   ${reassignCmd(d.worktree.path, layout)}`),
   ];
+  const note = defaultStackNote(layout);
+  if (note) lines.push(note);
   return lines.join('\n');
 }
 
-function unassignedSuggestion(claimants: Declaration[]): string {
+function unassignedSuggestion(claimants: Declaration[], layout: Layout): string {
   // Push temp directories to the back: they are usually abandoned staging and
   // should not fill the first lines of a paste-ready list.
   const sorted = [...claimants].sort((a, b) => {
@@ -227,20 +264,25 @@ function unassignedSuggestion(claimants: Declaration[]): string {
     if (ae !== be) return ae - be;
     return a.worktree.path.localeCompare(b.worktree.path);
   });
+  const up = layout.fixUp ?? 'slotyard alloc';
   const lines = [
-    'Fix (run lifecycle up in each worktree to allocate a slot; this starts the stack):',
-    ...sorted.slice(0, 6).map(d => `   ${assignCmd(d.worktree.path)}`),
+    'Fix (allocate a slot in each worktree):',
+    ...sorted.slice(0, 6).map(d => `   ${assignCmd(d.worktree.path, layout)}`),
     ...(sorted.length > 6
-      ? [`   …and ${sorted.length - 6} more, same command: tools/wt-supabase-lifecycle.sh up`]
+      ? [`   …and ${sorted.length - 6} more, same command: ${up}`]
       : []),
-    '   (add WT_SKIP_SUPABASE=1 to allocate without starting; usually no .wt-slot, so no rm needed)',
   ];
+  const note = defaultStackNote(layout);
+  if (note) lines.push(note);
   return lines.join('\n');
 }
 
+const CLONE_NOTE =
+  'naming matches this project but no worktree in this repo claims it; it may belong to another clone';
+
 /**
- * This is data, not garbage. So the inspect command comes first, deletion comes
- * after, and the ORDER IS FIXED: containers first, volumes last.
+ * This is data, not garbage. Inspect comes first; deletion is last, and only
+ * offered when we have not already proven the stack lives in another clone.
  *
  * Those exited containers are the only thing currently protecting these volumes
  * from a `docker volume prune`. Doing it the other way round dismantles the
@@ -249,19 +291,60 @@ function unassignedSuggestion(claimants: Declaration[]): string {
  * Filter by label rather than listing names: a truncated list pastes into a
  * command that does the wrong thing.
  */
-function orphanSuggestion(v: SlotView, labelKey: string): string {
-  const sel = `--filter label=${labelKey}=${v.projectId}`;
+function cloneInspectLines(v: SlotView): string[] {
+  const inspect: string[] = [];
+  if (v.volumes[0]) {
+    inspect.push(`   docker volume inspect ${v.volumes[0]} --format '{{.CreatedAt}}'`);
+  }
+  const sample = v.containers[0]?.name;
+  if (sample) {
+    inspect.push(
+      `   docker inspect ${sample} --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}'`,
+    );
+  }
+  return inspect;
+}
+
+function unclaimedSuggestion(v: SlotView, foreignDirs: string[]): string {
+  // Running and unclaimed: never offer docker rm. The stack may still be the
+  // other clone's live environment.
+  const why = foreignDirs.length > 0
+    ? 'Inspect only — a workDir is outside this repo, so the stack may belong to another clone:'
+    : 'Inspect only — a running stack with no claimant here may belong to another clone:';
   return [
-    'slotyard never deletes. Check age first:',
-    `   docker volume inspect ${v.volumes[0]} --format '{{.CreatedAt}}'`,
-    'If it really is abandoned — containers first, volumes last:',
-    `   docker rm $(docker ps -aq ${sel})`,
-    `   docker volume rm ${v.volumes.join(' ')}`,
+    `slotyard never deletes. ${CLONE_NOTE}.`,
+    why,
+    ...cloneInspectLines(v),
+  ].join('\n');
+}
+
+function orphanCloneSuggestion(v: SlotView, labelKey: string, foreignDirs: string[]): string {
+  const sel = `--filter label=${labelKey}=${v.projectId}`;
+  const inspect = cloneInspectLines(v);
+
+  if (foreignDirs.length > 0) {
+    // Proven foreign: inspect-only. docker rm of another clone's stack is
+    // how silent data loss happens across repos.
+    return [
+      `slotyard never deletes. ${CLONE_NOTE}.`,
+      'Inspect only — a workDir is outside this repo, so the stack may belong to another clone:',
+      ...inspect,
+    ].join('\n');
+  }
+
+  const del: string[] = [`   docker rm $(docker ps -aq ${sel})`];
+  if (v.volumes.length > 0) del.push(`   docker volume rm ${v.volumes.join(' ')}`);
+  return [
+    `slotyard never deletes. ${CLONE_NOTE}.`,
+    'Inspect first:',
+    ...inspect,
+    'Only if it really is abandoned — containers first, volumes last:',
+    ...del,
   ].join('\n');
 }
 
 function check(input: Input, slots: Map<number, SlotView>): Finding[] {
-  const { layout, mainRoot, worktrees, declarations, listeners, identities, volumes } = input;
+  const { layout, mainRoot, worktrees, declarations, listeners, identities, volumes, pathExists } = input;
   const out: Finding[] = [];
   const name = (p: string) => p.split('/').filter(Boolean).pop() ?? p;
   const slotHasVolumes = (slot: number) => {
@@ -306,7 +389,7 @@ function check(input: Input, slots: Map<number, SlotView>): Finding[] {
               : []),
           ],
           confidence: 'certain',
-          suggestion: unassignedSuggestion(actionable),
+          suggestion: unassignedSuggestion(actionable, layout),
         });
       } else if (raw.length >= 2) {
         out.push({
@@ -337,7 +420,7 @@ function check(input: Input, slots: Map<number, SlotView>): Finding[] {
         ...(raw.length > 8 ? [`  …and ${raw.length - 8} more`] : []),
       ],
       confidence: 'certain',
-      suggestion: collisionSuggestion(raw, active, name),
+      suggestion: collisionSuggestion(raw, active, name, layout),
     });
   }
 
@@ -345,6 +428,7 @@ function check(input: Input, slots: Map<number, SlotView>): Finding[] {
   for (const v of slots.values()) {
     if (!v.running || v.claimants.length > 0) continue;
     const live = v.containers.filter(c => c.state === 'running');
+    const foreignDirs = foreignWorkDirs(v.containers, mainRoot, worktrees);
     out.push({
       severity: 'warning',
       kind: 'unclaimed',
@@ -353,9 +437,11 @@ function check(input: Input, slots: Map<number, SlotView>): Finding[] {
       evidence: [
         `project_id = ${v.projectId}`,
         `up ${v.uptime}${v.memMiB ? ` · ${fmtMem(v.memMiB)}` : ''}`,
-        'the worktree was most likely deleted',
+        CLONE_NOTE,
+        ...foreignDirs.map(d => `workDir ${d}`),
       ],
       confidence: 'certain',
+      suggestion: unclaimedSuggestion(v, foreignDirs),
     });
   }
 
@@ -373,6 +459,7 @@ function check(input: Input, slots: Map<number, SlotView>): Finding[] {
   for (const v of slots.values()) {
     if (v.running || v.claimants.length > 0 || v.volumes.length === 0) continue;
     const since = v.containers.find(c => c.status)?.status ?? '';
+    const foreignDirs = foreignWorkDirs(v.containers, mainRoot, worktrees);
     out.push({
       severity: 'warning',
       kind: 'orphan-data',
@@ -384,9 +471,11 @@ function check(input: Input, slots: Map<number, SlotView>): Finding[] {
         ...v.volumes.slice(0, 4).map(n => `  ${n}`),
         ...(v.volumes.length > 4 ? [`  …and ${v.volumes.length - 4} more`] : []),
         'docker sees these as in-use (their own exited containers reference them) and will never prune them',
+        CLONE_NOTE,
+        ...foreignDirs.map(d => `workDir ${d}`),
       ],
       confidence: 'certain',
-      suggestion: orphanSuggestion(v, layout.stack.labelKey),
+      suggestion: orphanCloneSuggestion(v, layout.stack.labelKey, foreignDirs),
     });
   }
 
@@ -533,6 +622,19 @@ function check(input: Input, slots: Map<number, SlotView>): Finding[] {
     const home = listenerHome(pathHint, mainRoot, worktrees);
     if (home === 'worktree') continue;
     if (home === 'family') {
+      // A path that still exists under a shared parent is a live sibling
+      // (e.g. ~/.claude/worktrees of another project), not a deleted leftover.
+      if (pathHint && pathExists?.(pathHint)) {
+        out.push({
+          severity: foreignPortSeverity(hit.role),
+          kind: 'foreign-port',
+          slot: hit.slot,
+          message: `SLOT=${hit.slot} ${hit.role} port ${l.port} held by an outside process`,
+          evidence: foreignPortEvidence(hit.role, l),
+          confidence: pathHint ? 'certain' : 'uncertain',
+        });
+        continue;
+      }
       out.push({
         severity: foreignPortSeverity(hit.role),
         kind: 'orphan-port',
