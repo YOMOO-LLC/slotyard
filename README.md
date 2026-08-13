@@ -76,6 +76,12 @@ background service — one command, probed live, exits when done.
 ## Install
 
 ```bash
+git clone https://github.com/YOMOO-LLC/slotyard && cd slotyard && npm link
+```
+
+Or, once the package is on the npm registry:
+
+```bash
 npm i -g slotyard
 ```
 
@@ -85,12 +91,6 @@ there.
 
 **macOS is supported.** Linux is best-effort: the same probes (`docker`, `git`,
 `lsof`) exist, the tray app does not. Windows is not supported.
-
-From a checkout instead of npm:
-
-```bash
-git clone https://github.com/YOMOO-LLC/slotyard && cd slotyard && npm link
-```
 
 ## Use
 
