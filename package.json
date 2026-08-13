@@ -9,6 +9,14 @@
   "engines": {
     "node": ">=22.18"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "files": [
     "src",
     "README.md",
@@ -19,5 +27,21 @@
     "desktop": "npm --prefix desktop run dev",
     "desktop:build": "npm --prefix desktop run build"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOMOO-LLC/slotyard.git"
+  },
+  "homepage": "https://github.com/YOMOO-LLC/slotyard#readme",
+  "bugs": {
+    "url": "https://github.com/YOMOO-LLC/slotyard/issues"
+  },
+  "keywords": [
+    "supabase",
+    "docker",
+    "git-worktree",
+    "local-development",
+    "ports"
+  ],
+  "author": "YOMOO LLC",
   "license": "MIT"
 }

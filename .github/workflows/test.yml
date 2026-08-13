@@ -1,0 +1,23 @@
+# Unit tests only. The probe layer is test/e2e.sh against real docker, on purpose
+# — mocking docker would be testing the mocks. Do not add npm test; CLAUDE.md
+# forbids it. Node 22.18+ strips types natively.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: unit tests
+        run: node --test src/*.test.ts src/layouts/*.test.ts

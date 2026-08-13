@@ -75,8 +75,18 @@ background service — one command, probed live, exits when done.
 
 ## Install
 
-Node 22.18+ (native TypeScript stripping), git, docker. No dependencies, no
-build step.
+```bash
+npm i -g slotyard
+```
+
+Node 22.18+ (native TypeScript stripping), git, docker, lsof. No dependencies,
+no build step. The npm package is the CLI only; the menu-bar app is not shipped
+there.
+
+**macOS is supported.** Linux is best-effort: the same probes (`docker`, `git`,
+`lsof`) exist, the tray app does not. Windows is not supported.
+
+From a checkout instead of npm:
 
 ```bash
 git clone https://github.com/YOMOO-LLC/slotyard && cd slotyard && npm link
@@ -125,9 +135,21 @@ prints "already running", exits 0, and leaves them down.
 
 Two levels. Most projects stop at the first.
 
-**Level 0 — nothing to do.** slotyard finds your `supabase/config.toml` and
-infers the prefix, the base ports and where the file lives. A stock Supabase
-project works out of the box.
+**Level 0 — nothing to do, for a single environment.** slotyard finds your
+`supabase/config.toml` and infers the prefix, the base ports and where the file
+lives. A stock Supabase project with one local stack works out of the box.
+
+**Parallel worktrees need a naming convention.** slotyard joins on slot number.
+It expects the main repo's `project_id` to be a stable prefix, and every other
+worktree to use `${prefix}-sN` (slot 4 → `myapp-s4`). That is a project
+convention, not a Supabase rule — set `prefix` in `.slotyard.json` if inference
+would be wrong. If every worktree still has the hashed id `supabase init`
+generated, doctor cannot tell which environments belong together, and the
+report will look empty rather than wrong.
+
+`alloc` prints a number and writes nothing. You put that number into
+`config.toml` (what the supabase CLI actually reads). That split is
+intentional: a read-only tool does not need to be trusted with your config.
 
 **Level 1 — `.slotyard.json`** at the repo root, for the parts that cannot be
 inferred:
