@@ -8,34 +8,16 @@ Supabase stack, you already know the failure mode: two worktrees end up on the
 same `project_id`, share one database, and nothing anywhere reports an error.
 Your integration tests just start failing for no visible reason.
 
-```
-slotyard · myapp                            layout: myapp (.slotyard.json)
+<p align="center">
+  <img src="docs/panel.png" alt="slotyard menu-bar panel: 10 running worktrees and a critical finding" width="380">
+</p>
 
- SLOT  WORKTREE                          APP    API     RAM      CPU     UP
-   1   feature-export                   3110   54331   1.19G    1.5%    23h
-   4   fix-pagination                   3140   54361   1.20G    0.6%    5h
-   6   2 claimants                      3160   54381   1.06G    6.1%    23h    ⚠ collision
-   9   spike-caching                    3190   54411   974M     5.5%    7h
- ──────────────────────────────────────────────────────────────────────────────
-  4 running · 4.4G          12 declared · 32 worktrees          --all to expand
+The same scan from the CLI — live docker stats, CJK worktree names, and the
+finding that three worktrees are still on the unallocated default `project_id`:
 
-⚠ 4 findings (1 critical)
-
-  CRIT  SLOT=6 claimed by 2 worktrees at once
-        project_id = myapp-s6
-          feature-import
-          feature-audit
-        → Fix (keep feature-audit, reassign the rest; basis: containers are
-          running, so ownership cannot be traced back from a container):
-           cd '/workspaces/feature-import' && rm -f .wt-slot && slotyard alloc
-           set project_id in supabase/config.toml (supabase CLI reads that file)
-           and start the stack from this worktree
-
-  WARN  SLOT=8 still holds 3 volumes but no worktree claims it
-        naming matches this project but no worktree in this repo claims it;
-        it may belong to another clone
-        Inspect first, then containers first / volumes last only if abandoned
-```
+<p align="center">
+  <img src="docs/cli.png" alt="slotyard CLI report of the same machine" width="920">
+</p>
 
 ## Why docker cannot tell you this itself
 

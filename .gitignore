@@ -8,3 +8,4 @@ desktop/node_modules/
 .playwright-mcp/
 *.png
 !desktop/src-tauri/icons/*.png
+!docs/*.png
